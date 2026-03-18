@@ -4,8 +4,9 @@ init_historial.py
 Script de inicialización — se ejecuta UNA SOLA VEZ.
 
 Usa Telethon (userbot) para:
-  1. Leer TODO el historial de mensajes del grupo y poblar la BD SQLite con
-     el conteo de mensajes y la fecha del último mensaje de cada usuario.
+  1. Leer el historial reciente del grupo (últimos 5 000 mensajes o último año,
+     lo que ocurra primero) y poblar la BD SQLite con el conteo de mensajes y
+     la fecha del último mensaje de cada usuario.
   2. Importar todos los miembros actuales del grupo (incluyendo los que nunca
      han enviado mensajes), registrándolos con total_mensajes = 0.
 
@@ -14,14 +15,20 @@ Requisitos:
   - Archivo .env con: API_ID, API_HASH, BOT_TOKEN, GRUPO_ID
 
 Uso:
-  python init_historial.py
+  python init_historial.py [--fecha DDMMYYYY]
+
+  --fecha DDMMYYYY  (Opcional) Fecha que se asignará como último_mensaje a los
+                    usuarios que no hayan enviado ningún mensaje en el historial.
+                    Si se omite, esos usuarios quedan con último_mensaje = NULL.
+
   (La primera ejecución pedirá tu número de teléfono y el código de Telegram)
 """
 
+import argparse
 import asyncio
 import sqlite3
 import os
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 from dotenv import load_dotenv
 from telethon import TelegramClient
@@ -92,16 +99,31 @@ def upsert_usuario(conn: sqlite3.Connection,
 # Lógica principal
 # ---------------------------------------------------------------------------
 
+LIMITE_MENSAJES = 5_000
+LIMITE_DIAS     = 365
+
+
 async def leer_historial(client: TelegramClient, conn: sqlite3.Connection) -> None:
-    """Itera por todos los mensajes del grupo y actualiza la BD."""
+    """Itera los mensajes del grupo y actualiza la BD.
+
+    Se detiene cuando se cumpla la primera de estas condiciones:
+      - Se han procesado LIMITE_MENSAJES mensajes (5 000).
+      - Se alcanza un mensaje anterior a LIMITE_DIAS días (1 año).
+    """
 
     total_mensajes = 0
     total_usuarios: set[int] = set()
+    fecha_limite   = datetime.now(timezone.utc) - timedelta(days=LIMITE_DIAS)
 
     print(f"[INFO] Leyendo historial del grupo {GRUPO_ID}...")
-    print("[INFO] Esto puede tardar varios minutos dependiendo del tamaño del grupo.")
+    print(f"[INFO] Límite: {LIMITE_MENSAJES:,} mensajes o {LIMITE_DIAS} días "
+          f"(desde {fecha_limite.strftime('%Y-%m-%d')}), lo que ocurra primero.")
 
-    async for mensaje in client.iter_messages(GRUPO_ID, reverse=True):
+    async for mensaje in client.iter_messages(GRUPO_ID, limit=LIMITE_MENSAJES):
+
+        # Parar si el mensaje es anterior al límite temporal
+        if mensaje.date < fecha_limite:
+            break
 
         if not mensaje.sender or not isinstance(mensaje.sender, User):
             continue
@@ -166,15 +188,53 @@ async def importar_miembros(client: TelegramClient, conn: sqlite3.Connection) ->
     print(f"     Ya existían         : {total_procesados - total_nuevos:,}")
 
 
+def parsear_args() -> datetime | None:
+    """Parsea el argumento opcional --fecha DDMMYYYY y devuelve un datetime UTC o None."""
+    parser = argparse.ArgumentParser(
+        description="Inicializa el historial del grupo en la BD."
+    )
+    parser.add_argument(
+        "--fecha",
+        metavar="DDMMYYYY",
+        help="Fecha para usuarios sin mensajes (formato DDMMYYYY, ej: 01012024)",
+    )
+    args = parser.parse_args()
+
+    if args.fecha is None:
+        return None
+
+    try:
+        dt = datetime.strptime(args.fecha, "%d%m%Y")
+        return dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        parser.error(f"Formato de fecha inválido: '{args.fecha}'. Use DDMMYYYY (ej: 01012024).")
+
+
 async def main() -> None:
+    fecha_sin_mensajes = parsear_args()
+
     conn = init_db()
     print(f"[INFO] Base de datos lista: {DB_PATH}")
+
+    if fecha_sin_mensajes:
+        print(f"[INFO] Fecha para usuarios sin mensajes: "
+              f"{fecha_sin_mensajes.strftime('%d/%m/%Y')}")
 
     async with TelegramClient(SESSION_NAME, API_ID, API_HASH) as client:
         me = await client.get_me()
         print(f"[INFO] Sesión iniciada como: {me.first_name} (id={me.id})")
         await leer_historial(client, conn)
         await importar_miembros(client, conn)
+
+    if fecha_sin_mensajes:
+        fecha_str = fecha_sin_mensajes.isoformat()
+        cur = conn.execute(
+            "UPDATE usuarios SET ultimo_mensaje = ? WHERE ultimo_mensaje IS NULL",
+            (fecha_str,),
+        )
+        conn.commit()
+        print(f"[OK] {cur.rowcount} usuarios sin mensajes actualizados "
+              f"con fecha {fecha_sin_mensajes.strftime('%d/%m/%Y')}.")
 
     conn.close()
     print("[INFO] Conexión a la BD cerrada. ¡Listo para usar bot_estadisticas.py!")

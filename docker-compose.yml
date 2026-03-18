@@ -6,7 +6,7 @@ services:
     env_file:
       - .env
     volumes:
-      - stats_data:/app/data
+      - ./data:/app/data
     # Hardening
     read_only: true
     tmpfs:
@@ -17,15 +17,17 @@ services:
       - ALL
 
   # Servicio de inicialización (ejecutar una sola vez con: docker compose run --rm init)
+  # El profile "init" evita que se arranque con un "docker compose up" normal.
   init:
     build: .
     container_name: stats-bot-init
+    profiles: ["init"]
     stdin_open: true
     tty: true
     env_file:
       - .env
     volumes:
-      - stats_data:/app/data
+      - ./data:/app/data
     # Hardening
     read_only: true
     tmpfs:
