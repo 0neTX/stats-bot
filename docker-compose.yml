@@ -1,0 +1,24 @@
+services:
+  bot:
+    build: .
+    container_name: stats-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - stats_data:/app/data
+
+  # Servicio de inicialización (ejecutar una sola vez con: docker compose run --rm init)
+  init:
+    build: .
+    container_name: stats-bot-init
+    stdin_open: true
+    tty: true
+    env_file:
+      - .env
+    volumes:
+      - stats_data:/app/data
+    command: ["python", "/app/src/init_historial.py"]
+
+volumes:
+  stats_data:
