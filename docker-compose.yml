@@ -7,6 +7,14 @@ services:
       - .env
     volumes:
       - stats_data:/app/data
+    # Hardening
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
 
   # Servicio de inicialización (ejecutar una sola vez con: docker compose run --rm init)
   init:
@@ -18,6 +26,14 @@ services:
       - .env
     volumes:
       - stats_data:/app/data
+    # Hardening
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     command: ["python", "/app/src/init_historial.py"]
 
 volumes:
