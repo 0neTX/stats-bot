@@ -139,7 +139,8 @@ async def importar_miembros(client: TelegramClient, conn: sqlite3.Connection) ->
     """Registra todos los miembros actuales del grupo con total_mensajes = 0
     si aún no existen en la BD (no sobreescribe conteos ya acumulados)."""
 
-    total = 0
+    total_nuevos = 0
+    total_procesados = 0
     print(f"\n[INFO] Importando miembros actuales del grupo {GRUPO_ID}...")
 
     async for miembro in client.iter_participants(GRUPO_ID):
@@ -150,14 +151,19 @@ async def importar_miembros(client: TelegramClient, conn: sqlite3.Connection) ->
             f"{miembro.first_name or ''} {miembro.last_name or ''}".strip()
             or str(miembro.id)
         )
+        cambios_antes = conn.total_changes
         conn.execute("""
             INSERT OR IGNORE INTO usuarios (user_id, nombre, username, total_mensajes, ultimo_mensaje)
             VALUES (?, ?, ?, 0, NULL)
         """, (miembro.id, nombre, miembro.username))
-        total += 1
+        total_procesados += 1
+        if conn.total_changes > cambios_antes:
+            total_nuevos += 1
 
     conn.commit()
-    print(f"[OK] Miembros importados: {total:,} (solo los nuevos; los existentes no se modificaron)")
+    print(f"[OK] Miembros procesados : {total_procesados:,}")
+    print(f"     Nuevos insertados   : {total_nuevos:,}")
+    print(f"     Ya existían         : {total_procesados - total_nuevos:,}")
 
 
 async def main() -> None:
