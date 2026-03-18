@@ -175,7 +175,7 @@ async def handler_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 # Tarea programada: resumen diario
 # ---------------------------------------------------------------------------
 
-def _formatear_usuario(posicion: int, user_id: int, nombre: str,
+def _formatear_usuario(user_id: int, nombre: str,
                         username: str | None, total: int,
                         icono: str) -> str:
     nombre_safe = (
@@ -209,12 +209,12 @@ async def enviar_resumen_diario(context: ContextTypes.DEFAULT_TYPE) -> None:
     # --- Top 5 ---
     lineas.append("🏆 *Top 5 — Más activos*\n")
     for i, (user_id, nombre, username, total, _) in enumerate(top5):
-        lineas.append(_formatear_usuario(i, user_id, nombre, username, total, medallas[i]))
+        lineas.append(_formatear_usuario(user_id, nombre, username, total, medallas[i]))
 
     # --- Down 5 ---
     lineas.append("\n💤 *Down 5 — Menos activos*\n")
     for i, (user_id, nombre, username, total, _) in enumerate(down5):
-        lineas.append(_formatear_usuario(i, user_id, nombre, username, total, calavers[i]))
+        lineas.append(_formatear_usuario(user_id, nombre, username, total, calavers[i]))
 
     lineas.append(f"\n_Actualizado cada día a las 10:00 UTC_")
     texto = "\n".join(lineas)
@@ -256,10 +256,11 @@ def main() -> None:
     logger.info(f"Tarea diaria programada para las {HORA_REPORTE} UTC")
 
     logger.info("Bot iniciado. Esperando mensajes...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
-
-    _conn.close()
-    logger.info("BD cerrada. Bot detenido.")
+    try:
+        app.run_polling(allowed_updates=Update.ALL_TYPES)
+    finally:
+        _conn.close()
+        logger.info("BD cerrada. Bot detenido.")
 
 
 if __name__ == "__main__":
