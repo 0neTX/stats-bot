@@ -3,9 +3,11 @@ init_historial.py
 =================
 Script de inicialización — se ejecuta UNA SOLA VEZ.
 
-Usa Telethon (userbot) para leer TODO el historial de mensajes del grupo
-y poblar la base de datos SQLite 'estadisticas_grupo.db' con el conteo
-de mensajes y la fecha del último mensaje de cada usuario.
+Usa Telethon (userbot) para:
+  1. Leer TODO el historial de mensajes del grupo y poblar la BD SQLite con
+     el conteo de mensajes y la fecha del último mensaje de cada usuario.
+  2. Importar todos los miembros actuales del grupo (incluyendo los que nunca
+     han enviado mensajes), registrándolos con total_mensajes = 0.
 
 Requisitos:
   - pip install telethon python-dotenv
@@ -133,6 +135,31 @@ async def leer_historial(client: TelegramClient, conn: sqlite3.Connection) -> No
     print(f"     Usuarios únicos     : {len(total_usuarios):,}")
 
 
+async def importar_miembros(client: TelegramClient, conn: sqlite3.Connection) -> None:
+    """Registra todos los miembros actuales del grupo con total_mensajes = 0
+    si aún no existen en la BD (no sobreescribe conteos ya acumulados)."""
+
+    total = 0
+    print(f"\n[INFO] Importando miembros actuales del grupo {GRUPO_ID}...")
+
+    async for miembro in client.iter_participants(GRUPO_ID):
+        if not isinstance(miembro, User) or miembro.bot or miembro.deleted:
+            continue
+
+        nombre = (
+            f"{miembro.first_name or ''} {miembro.last_name or ''}".strip()
+            or str(miembro.id)
+        )
+        conn.execute("""
+            INSERT OR IGNORE INTO usuarios (user_id, nombre, username, total_mensajes, ultimo_mensaje)
+            VALUES (?, ?, ?, 0, NULL)
+        """, (miembro.id, nombre, miembro.username))
+        total += 1
+
+    conn.commit()
+    print(f"[OK] Miembros importados: {total:,} (solo los nuevos; los existentes no se modificaron)")
+
+
 async def main() -> None:
     conn = init_db()
     print(f"[INFO] Base de datos lista: {DB_PATH}")
@@ -141,6 +168,7 @@ async def main() -> None:
         me = await client.get_me()
         print(f"[INFO] Sesión iniciada como: {me.first_name} (id={me.id})")
         await leer_historial(client, conn)
+        await importar_miembros(client, conn)
 
     conn.close()
     print("[INFO] Conexión a la BD cerrada. ¡Listo para usar bot_estadisticas.py!")
