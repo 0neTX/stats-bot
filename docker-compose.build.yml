@@ -1,6 +1,7 @@
 services:
   bot:
-    image: ghcr.io/0netx/stats-bot:latest
+    build: .
+    image: ghcr.io/0netx/stats-bot:local
     container_name: stats-bot
     restart: unless-stopped
     env_file:
@@ -19,7 +20,8 @@ services:
   # Servicio de inicialización (ejecutar una sola vez con: docker compose run --rm init)
   # El profile "init" evita que se arranque con un "docker compose up" normal.
   init:
-    image: ghcr.io/0netx/stats-bot:latest
+    build: .
+    image: ghcr.io/0netx/stats-bot:local
     container_name: stats-bot-init
     profiles: ["init"]
     stdin_open: true
