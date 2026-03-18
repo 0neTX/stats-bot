@@ -89,6 +89,12 @@ def registrar_miembro(user_id: int, nombre: str, username: str | None) -> None:
     _conn.commit()
 
 
+def eliminar_miembro(user_id: int) -> None:
+    """Elimina al usuario de la BD cuando sale o es expulsado del grupo."""
+    _conn.execute("DELETE FROM usuarios WHERE user_id = ?", (user_id,))
+    _conn.commit()
+
+
 def registrar_mensaje(user_id: int,
                       nombre: str,
                       username: str | None,
@@ -133,7 +139,7 @@ def obtener_down5() -> list[tuple[int, str, str | None, int, str | None]]:
 # ---------------------------------------------------------------------------
 
 async def handler_miembro(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Registra en la BD a cualquier usuario que se une al grupo."""
+    """Registra o elimina usuarios de la BD según entren o salgan del grupo."""
     cambio: ChatMemberUpdated = update.chat_member
     nuevo = cambio.new_chat_member
     usuario = nuevo.user
@@ -142,15 +148,18 @@ async def handler_miembro(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     estados_activos = {"member", "administrator", "creator", "restricted"}
-    if nuevo.status not in estados_activos:
-        return
+    estados_salida  = {"left", "kicked"}
 
-    nombre = (
-        f"{usuario.first_name or ''} {usuario.last_name or ''}".strip()
-        or str(usuario.id)
-    )
-    registrar_miembro(usuario.id, nombre, usuario.username)
-    logger.info(f"Nuevo miembro registrado: {nombre} (id={usuario.id})")
+    if nuevo.status in estados_activos:
+        nombre = (
+            f"{usuario.first_name or ''} {usuario.last_name or ''}".strip()
+            or str(usuario.id)
+        )
+        registrar_miembro(usuario.id, nombre, usuario.username)
+        logger.info(f"Miembro registrado: {nombre} (id={usuario.id})")
+    elif nuevo.status in estados_salida:
+        eliminar_miembro(usuario.id)
+        logger.info(f"Miembro eliminado: id={usuario.id} (estado={nuevo.status})")
 
 
 async def handler_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
