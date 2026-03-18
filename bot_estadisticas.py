@@ -107,6 +107,17 @@ def obtener_top5() -> list[tuple[int, str, str | None, int, str | None]]:
     return cur.fetchall()
 
 
+def obtener_down5() -> list[tuple[int, str, str | None, int, str | None]]:
+    """Devuelve los 5 usuarios con menos mensajes ordenados de menor a mayor."""
+    cur = _conn.execute("""
+        SELECT user_id, nombre, username, total_mensajes, ultimo_mensaje
+        FROM   usuarios
+        ORDER  BY total_mensajes ASC
+        LIMIT  5
+    """)
+    return cur.fetchall()
+
+
 # ---------------------------------------------------------------------------
 # Handlers
 # ---------------------------------------------------------------------------
@@ -133,30 +144,46 @@ async def handler_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 # Tarea programada: resumen diario
 # ---------------------------------------------------------------------------
 
+def _formatear_usuario(posicion: int, user_id: int, nombre: str,
+                        username: str | None, total: int,
+                        icono: str) -> str:
+    nombre_safe = (
+        nombre
+        .replace("_", "\\_")
+        .replace("*", "\\*")
+        .replace("[", "\\[")
+        .replace("`", "\\`")
+    )
+    alias = f"@{username}" if username else f"id:{user_id}"
+    return (
+        f"{icono} *{nombre_safe}* ({alias})\n"
+        f"   └ {total:,} mensajes"
+    )
+
+
 async def enviar_resumen_diario(context: ContextTypes.DEFAULT_TYPE) -> None:
-    top5 = obtener_top5()
+    top5  = obtener_top5()
+    down5 = obtener_down5()
 
     if not top5:
         logger.info("Sin datos para el resumen diario.")
         return
 
-    ahora = datetime.now(tz=timezone.utc).strftime("%d/%m/%Y")
-    lineas = [f"📊 *Estadísticas del grupo* — {ahora}\n"]
+    ahora   = datetime.now(tz=timezone.utc).strftime("%d/%m/%Y")
     medallas = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
+    calavers = ["💀", "😴", "🐌", "🦥", "👻"]
 
-    for posicion, (user_id, nombre, username, total, ultimo) in enumerate(top5):
-        nombre_safe = (
-            nombre
-            .replace("_", "\\_")
-            .replace("*", "\\*")
-            .replace("[", "\\[")
-            .replace("`", "\\`")
-        )
-        alias = f"@{username}" if username else f"id:{user_id}"
-        lineas.append(
-            f"{medallas[posicion]} *{nombre_safe}* ({alias})\n"
-            f"   └ {total:,} mensajes"
-        )
+    lineas = [f"📊 *Estadísticas del grupo* — {ahora}\n"]
+
+    # --- Top 5 ---
+    lineas.append("🏆 *Top 5 — Más activos*\n")
+    for i, (user_id, nombre, username, total, _) in enumerate(top5):
+        lineas.append(_formatear_usuario(i, user_id, nombre, username, total, medallas[i]))
+
+    # --- Down 5 ---
+    lineas.append("\n💤 *Down 5 — Menos activos*\n")
+    for i, (user_id, nombre, username, total, _) in enumerate(down5):
+        lineas.append(_formatear_usuario(i, user_id, nombre, username, total, calavers[i]))
 
     lineas.append(f"\n_Actualizado cada día a las 10:00 UTC_")
     texto = "\n".join(lineas)
