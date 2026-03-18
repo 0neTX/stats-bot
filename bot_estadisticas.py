@@ -23,9 +23,10 @@ import os
 from datetime import datetime, time, timezone
 
 from dotenv import load_dotenv
-from telegram import Update
+from telegram import Update, ChatMemberUpdated
 from telegram.ext import (
     Application,
+    ChatMemberHandler,
     ContextTypes,
     MessageHandler,
     filters,
@@ -79,6 +80,15 @@ def get_conn() -> sqlite3.Connection:
 _conn: sqlite3.Connection = get_conn()
 
 
+def registrar_miembro(user_id: int, nombre: str, username: str | None) -> None:
+    """Inserta el miembro con 0 mensajes si no existe aún en la BD."""
+    _conn.execute("""
+        INSERT OR IGNORE INTO usuarios (user_id, nombre, username, total_mensajes, ultimo_mensaje)
+        VALUES (?, ?, ?, 0, NULL)
+    """, (user_id, nombre, username))
+    _conn.commit()
+
+
 def registrar_mensaje(user_id: int,
                       nombre: str,
                       username: str | None,
@@ -121,6 +131,27 @@ def obtener_down5() -> list[tuple[int, str, str | None, int, str | None]]:
 # ---------------------------------------------------------------------------
 # Handlers
 # ---------------------------------------------------------------------------
+
+async def handler_miembro(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Registra en la BD a cualquier usuario que se une al grupo."""
+    cambio: ChatMemberUpdated = update.chat_member
+    nuevo = cambio.new_chat_member
+    usuario = nuevo.user
+
+    if usuario.is_bot:
+        return
+
+    estados_activos = {"member", "administrator", "creator", "restricted"}
+    if nuevo.status not in estados_activos:
+        return
+
+    nombre = (
+        f"{usuario.first_name or ''} {usuario.last_name or ''}".strip()
+        or str(usuario.id)
+    )
+    registrar_miembro(usuario.id, nombre, usuario.username)
+    logger.info(f"Nuevo miembro registrado: {nombre} (id={usuario.id})")
+
 
 async def handler_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg  = update.effective_message
@@ -206,6 +237,9 @@ def main() -> None:
 
     app = Application.builder().token(BOT_TOKEN).build()
 
+    app.add_handler(
+        ChatMemberHandler(handler_miembro, ChatMemberHandler.CHAT_MEMBER)
+    )
     app.add_handler(
         MessageHandler(
             filters.TEXT & filters.ChatType.GROUPS,
