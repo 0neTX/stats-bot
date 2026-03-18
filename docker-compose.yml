@@ -37,6 +37,3 @@ services:
     cap_drop:
       - ALL
     command: ["python", "/app/src/init_historial.py"]
-
-volumes:
-  stats_data:
