@@ -129,7 +129,13 @@ async def leer_historial(client: TelegramClient, conn: sqlite3.Connection) -> No
             continue
         if mensaje.sender.bot:
             continue
-        if mensaje.text is None and mensaje.message is None:
+        # Contar texto, fotos y vídeos; ignorar stickers y mensajes sin contenido
+        tiene_contenido = (
+            bool(mensaje.text)
+            or mensaje.photo is not None
+            or mensaje.video is not None
+        )
+        if not tiene_contenido:
             continue
 
         remitente: User = mensaje.sender

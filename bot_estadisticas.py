@@ -571,7 +571,7 @@ def main() -> None:
     )
     app.add_handler(
         MessageHandler(
-            filters.TEXT & filters.ChatType.GROUPS,
+            (filters.TEXT | filters.PHOTO | filters.VIDEO) & filters.ChatType.GROUPS,
             handler_mensaje,
         )
     )
