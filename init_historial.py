@@ -61,9 +61,21 @@ def init_db() -> sqlite3.Connection:
             nombre         TEXT    NOT NULL DEFAULT '',
             username       TEXT    DEFAULT NULL,
             total_mensajes INTEGER NOT NULL DEFAULT 0,
-            ultimo_mensaje TEXT    DEFAULT NULL
+            ultimo_mensaje TEXT    DEFAULT NULL,
+            fecha_registro TEXT    DEFAULT NULL
         )
     """)
+    # Migración: añadir fecha_registro si la tabla ya existía sin esa columna
+    try:
+        conn.execute("ALTER TABLE usuarios ADD COLUMN fecha_registro TEXT DEFAULT NULL")
+    except sqlite3.OperationalError:
+        pass  # la columna ya existe
+    ahora = datetime.now(timezone.utc).isoformat()
+    conn.execute("""
+        UPDATE usuarios
+        SET    fecha_registro = COALESCE(ultimo_mensaje, ?)
+        WHERE  fecha_registro IS NULL
+    """, (ahora,))
     conn.commit()
     return conn
 
@@ -80,8 +92,9 @@ def upsert_usuario(conn: sqlite3.Connection,
     """
     fecha_str = fecha.isoformat()
     conn.execute("""
-        INSERT INTO usuarios (user_id, nombre, username, total_mensajes, ultimo_mensaje)
-        VALUES (?, ?, ?, 1, ?)
+        INSERT INTO usuarios
+            (user_id, nombre, username, total_mensajes, ultimo_mensaje, fecha_registro)
+        VALUES (?, ?, ?, 1, ?, ?)
         ON CONFLICT(user_id) DO UPDATE SET
             nombre         = excluded.nombre,
             username       = excluded.username,
@@ -92,7 +105,8 @@ def upsert_usuario(conn: sqlite3.Connection,
                 THEN excluded.ultimo_mensaje
                 ELSE ultimo_mensaje
             END
-    """, (user_id, nombre, username, fecha_str))
+            -- fecha_registro nunca se modifica una vez establecida
+    """, (user_id, nombre, username, fecha_str, fecha_str))
 
 
 # ---------------------------------------------------------------------------
@@ -179,11 +193,13 @@ async def importar_miembros(client: TelegramClient, conn: sqlite3.Connection) ->
             f"{miembro.first_name or ''} {miembro.last_name or ''}".strip()
             or str(miembro.id)
         )
+        ahora = datetime.now(timezone.utc).isoformat()
         cambios_antes = conn.total_changes
         conn.execute("""
-            INSERT OR IGNORE INTO usuarios (user_id, nombre, username, total_mensajes, ultimo_mensaje)
-            VALUES (?, ?, ?, 0, NULL)
-        """, (miembro.id, nombre, miembro.username))
+            INSERT OR IGNORE INTO usuarios
+                (user_id, nombre, username, total_mensajes, ultimo_mensaje, fecha_registro)
+            VALUES (?, ?, ?, 0, NULL, ?)
+        """, (miembro.id, nombre, miembro.username, ahora))
         total_procesados += 1
         if conn.total_changes > cambios_antes:
             total_nuevos += 1

@@ -19,6 +19,7 @@ Uso:
   python bot_estadisticas.py
 """
 
+import json
 import logging
 import os
 import sqlite3
@@ -64,8 +65,12 @@ SESSION_NAME = "sesion_admin"
 MAX_DAYS_INACTIVE_WARNING  = int(os.getenv("MAX_DAYS_INACTIVE_WARNING", "30"))
 MAX_DAYS_INACTIVE_REMOVAL  = int(os.getenv("MAX_DAYS_INACTIVE_REMOVAL", "60"))
 
-DB_PATH      = "estadisticas_grupo.db"
-HORA_REPORTE = time(hour=10, minute=0, second=0, tzinfo=timezone.utc)
+DB_PATH        = "estadisticas_grupo.db"
+BOT_STATE_PATH = "bot_state.json"
+HORA_REPORTE   = time(hour=10, minute=0, second=0, tzinfo=timezone.utc)
+
+# Timestamp del último mensaje procesado; se persiste en bot_state.json al parar
+_ultimo_registro: datetime | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -82,15 +87,21 @@ def get_conn() -> sqlite3.Connection:
             nombre         TEXT    NOT NULL DEFAULT '',
             username       TEXT    DEFAULT NULL,
             total_mensajes INTEGER NOT NULL DEFAULT 0,
-            ultimo_mensaje TEXT    DEFAULT NULL
+            ultimo_mensaje TEXT    DEFAULT NULL,
+            fecha_registro TEXT    DEFAULT NULL
         )
     """)
+    # Migración: añadir fecha_registro si la tabla ya existía sin esa columna
+    try:
+        conn.execute("ALTER TABLE usuarios ADD COLUMN fecha_registro TEXT DEFAULT NULL")
+    except sqlite3.OperationalError:
+        pass  # la columna ya existe
+    ahora = datetime.now(timezone.utc).isoformat()
     conn.execute("""
-        CREATE TABLE IF NOT EXISTS metadata (
-            clave TEXT PRIMARY KEY,
-            valor TEXT NOT NULL
-        )
-    """)
+        UPDATE usuarios
+        SET    fecha_registro = COALESCE(ultimo_mensaje, ?)
+        WHERE  fecha_registro IS NULL
+    """, (ahora,))
     conn.commit()
     return conn
 
@@ -98,31 +109,45 @@ def get_conn() -> sqlite3.Connection:
 _conn: sqlite3.Connection = get_conn()
 
 
-def get_last_run() -> datetime | None:
-    """Devuelve el timestamp de la última ejecución del bot, o None si no existe."""
-    cur = _conn.execute("SELECT valor FROM metadata WHERE clave = 'last_run'")
-    row = cur.fetchone()
-    if row is None:
+# ---------------------------------------------------------------------------
+# Estado del bot (bot_state.json)
+# ---------------------------------------------------------------------------
+
+def leer_bot_state() -> dict:
+    """Lee bot_state.json; devuelve dict vacío si no existe."""
+    try:
+        with open(BOT_STATE_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def guardar_bot_state(fecha_arranque: datetime, ultimo_registro: datetime) -> None:
+    """Persiste fecha_arranque y ultimo_registro en bot_state.json."""
+    state = {
+        "fecha_arranque":   fecha_arranque.isoformat(),
+        "ultimo_registro":  ultimo_registro.isoformat(),
+    }
+    with open(BOT_STATE_PATH, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2)
+
+
+def leer_ultimo_registro() -> datetime | None:
+    """Devuelve el ultimo_registro guardado en bot_state.json, o None si no existe."""
+    raw = leer_bot_state().get("ultimo_registro")
+    if raw is None:
         return None
-    return datetime.fromisoformat(row[0])
-
-
-def set_last_run(dt: datetime) -> None:
-    """Guarda el timestamp de la ejecución actual."""
-    _conn.execute("""
-        INSERT INTO metadata (clave, valor) VALUES ('last_run', ?)
-        ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor
-    """, (dt.isoformat(),))
-    _conn.commit()
+    return datetime.fromisoformat(raw)
 
 
 def registrar_miembro(user_id: int, nombre: str, username: str | None) -> None:
     """Inserta el miembro con 0 mensajes si no existe aún en la BD."""
     ahora = datetime.now(timezone.utc).isoformat()
     _conn.execute("""
-        INSERT OR IGNORE INTO usuarios (user_id, nombre, username, total_mensajes, ultimo_mensaje)
-        VALUES (?, ?, ?, 0, ?)
-    """, (user_id, nombre, username, ahora))
+        INSERT OR IGNORE INTO usuarios
+            (user_id, nombre, username, total_mensajes, ultimo_mensaje, fecha_registro)
+        VALUES (?, ?, ?, 0, ?, ?)
+    """, (user_id, nombre, username, ahora, ahora))
     _conn.commit()
 
 
@@ -136,17 +161,23 @@ def registrar_mensaje(user_id: int,
                       nombre: str,
                       username: str | None,
                       fecha: datetime) -> None:
+    global _ultimo_registro
     fecha_str = fecha.isoformat()
+    ahora     = datetime.now(timezone.utc).isoformat()
     _conn.execute("""
-        INSERT INTO usuarios (user_id, nombre, username, total_mensajes, ultimo_mensaje)
-        VALUES (?, ?, ?, 1, ?)
+        INSERT INTO usuarios
+            (user_id, nombre, username, total_mensajes, ultimo_mensaje, fecha_registro)
+        VALUES (?, ?, ?, 1, ?, ?)
         ON CONFLICT(user_id) DO UPDATE SET
             nombre         = excluded.nombre,
             username       = excluded.username,
             total_mensajes = total_mensajes + 1,
             ultimo_mensaje = excluded.ultimo_mensaje
-    """, (user_id, nombre, username, fecha_str))
+    """, (user_id, nombre, username, fecha_str, ahora))
     _conn.commit()
+    # Actualizar el último registro procesado en memoria
+    if _ultimo_registro is None or fecha > _ultimo_registro:
+        _ultimo_registro = fecha
 
 
 def obtener_top5() -> list[tuple[int, str, str | None, int, str | None]]:
@@ -452,34 +483,43 @@ async def handler_ok(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 # Arranque: recuperar mensajes perdidos y enviar reporte al admin
 # ---------------------------------------------------------------------------
 
-async def actualizar_desde_ultima_ejecucion() -> int:
+async def actualizar_desde_ultima_ejecucion() -> tuple[int, set[int]]:
     """
-    Usa Telethon para recuperar los mensajes del grupo enviados desde la
-    última ejecución del bot. Devuelve el número de mensajes procesados.
+    Usa Telethon para recuperar los mensajes del grupo enviados desde el
+    ultimo_registro guardado en bot_state.json.
+
+    Devuelve (total_mensajes_procesados, set de user_ids con actividad en ese periodo).
     """
-    last_run = get_last_run()
-    ahora    = datetime.now(timezone.utc)
+    global _ultimo_registro
+    ultimo_registro = leer_ultimo_registro()
 
-    if last_run is None:
-        logger.info("[arranque] Sin registro de última ejecución; omitiendo recuperación.")
-        set_last_run(ahora)
-        return 0
+    if ultimo_registro is None:
+        logger.info("[arranque] Sin registro previo; omitiendo recuperación.")
+        return 0, set()
 
-    logger.info(f"[arranque] Recuperando mensajes desde {last_run.isoformat()} ...")
+    _ultimo_registro = ultimo_registro
+    logger.info(f"[arranque] Recuperando mensajes desde {ultimo_registro.isoformat()} ...")
 
-    total = 0
+    total        = 0
+    activos: set[int] = set()
+
     try:
         async with TelegramClient(SESSION_NAME, API_ID, API_HASH) as client:
             async for mensaje in client.iter_messages(GRUPO_ID):
-                # iter_messages va de más reciente a más antiguo; parar al llegar al límite
-                if mensaje.date <= last_run:
+                if mensaje.date <= ultimo_registro:
                     break
 
                 if not mensaje.sender or not isinstance(mensaje.sender, TelethonUser):
                     continue
                 if mensaje.sender.bot:
                     continue
-                if mensaje.text is None and mensaje.message is None:
+
+                tiene_contenido = (
+                    bool(mensaje.text)
+                    or mensaje.photo is not None
+                    or mensaje.video is not None
+                )
+                if not tiene_contenido:
                     continue
 
                 remitente = mensaje.sender
@@ -488,23 +528,77 @@ async def actualizar_desde_ultima_ejecucion() -> int:
                     or str(remitente.id)
                 )
                 registrar_mensaje(remitente.id, nombre, remitente.username, mensaje.date)
+                activos.add(remitente.id)
                 total += 1
 
     except Exception as exc:
         logger.warning(f"[arranque] No se pudo conectar con Telethon: {exc}")
         logger.warning("[arranque] Se omite la recuperación de mensajes perdidos.")
 
-    set_last_run(ahora)
-    logger.info(f"[arranque] Recuperación completada: {total:,} mensajes nuevos procesados.")
-    return total
+    logger.info(f"[arranque] Recuperación completada: {total:,} mensajes, "
+                f"{len(activos)} usuarios con actividad.")
+    return total, activos
+
+
+async def enviar_resumen_recuperados(bot, recuperados: list[tuple]) -> None:
+    """Envía al admin la lista de usuarios inactivos que han vuelto a ser activos."""
+    if not recuperados:
+        return
+
+    logger.info(f"[recuperados] {len(recuperados)} usuario(s) han vuelto a estar activos:")
+    lineas = [
+        "✅ <b>Usuarios que han vuelto a participar</b>\n",
+        "Los siguientes usuarios estaban inactivos pero han registrado actividad "
+        "mientras el bot estaba detenido.\n",
+    ]
+    for user_id, nombre, username, total, ultimo in recuperados:
+        alias = f"@{username}" if username else f"id:{user_id}"
+        dt    = datetime.fromisoformat(ultimo)
+        lineas.append(
+            f"• <b>{_escape_html(nombre)}</b> ({alias}) — "
+            f"última actividad: {dt.strftime('%d/%m/%Y %H:%M')}"
+        )
+        logger.info(f"  · {nombre} ({alias}) | última actividad: {dt.strftime('%d/%m/%Y')}")
+
+    await _send_long_message(bot, ADMIN_ID, "\n".join(lineas), "HTML")
 
 
 async def post_init(application: Application) -> None:
     """
     Callback ejecutado una vez que la aplicación está inicializada.
-    Recupera mensajes perdidos, genera el reporte y lo envía al admin.
+    1. Obtiene usuarios inactivos ANTES de procesar la recuperación.
+    2. Recupera mensajes perdidos desde ultimo_registro.
+    3. Detecta inactivos que han vuelto y envía resumen al admin.
+    4. Guarda el nuevo estado en bot_state.json.
+    5. Envía reporte de estadísticas, aviso de inactividad y reporte de expulsión.
     """
-    mensajes_nuevos = await actualizar_desde_ultima_ejecucion()
+    global _ultimo_registro
+
+    fecha_arranque = datetime.now(timezone.utc)
+
+    # Snapshot de usuarios inactivos ANTES de procesar mensajes perdidos
+    inactivos_antes = {
+        row[0]: row
+        for row in obtener_usuarios_inactivos(MAX_DAYS_INACTIVE_WARNING)
+    }
+
+    mensajes_nuevos, activos_recuperacion = await actualizar_desde_ultima_ejecucion()
+
+    # Usuarios que estaban inactivos y han tenido actividad durante el periodo caído
+    recuperados = [
+        inactivos_antes[uid]
+        for uid in activos_recuperacion
+        if uid in inactivos_antes
+    ]
+
+    # Persistir estado: fecha de arranque y último registro procesado
+    _ultimo_registro = _ultimo_registro or fecha_arranque
+    guardar_bot_state(fecha_arranque, _ultimo_registro)
+    logger.info(f"[arranque] bot_state.json actualizado. "
+                f"arranque={fecha_arranque.isoformat()} | "
+                f"ultimo_registro={_ultimo_registro.isoformat()}")
+
+    await enviar_resumen_recuperados(application.bot, recuperados)
 
     top5  = obtener_top5()
     down5 = obtener_down5()
@@ -595,6 +689,14 @@ def main() -> None:
     try:
         app.run_polling(allowed_updates=Update.ALL_TYPES)
     finally:
+        # Persistir el último registro procesado antes de cerrar
+        ahora = datetime.now(timezone.utc)
+        state = leer_bot_state()
+        fecha_arranque = datetime.fromisoformat(state["fecha_arranque"]) \
+            if "fecha_arranque" in state else ahora
+        guardar_bot_state(fecha_arranque, _ultimo_registro or ahora)
+        logger.info(f"[shutdown] bot_state.json persistido. "
+                    f"ultimo_registro={(_ultimo_registro or ahora).isoformat()}")
         _conn.close()
         logger.info("BD cerrada. Bot detenido.")
 
