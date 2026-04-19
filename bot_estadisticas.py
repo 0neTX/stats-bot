@@ -204,16 +204,24 @@ def obtener_usuarios_inactivos(dias_warning: int) -> list[tuple[int, str, str | 
     return cur.fetchall()
 
 
-def obtener_usuarios_para_expulsar() -> list[tuple[int, str, str | None, int, str]]:
-    """Devuelve usuarios cuyo último mensaje superó MAX_DAYS_INACTIVE_REMOVAL días."""
+def obtener_usuarios_para_expulsar() -> list[tuple[int, str, str | None, int, str | None]]:
+    """Devuelve hasta 10 usuarios a expulsar ordenados por prioridad.
+
+    Prioridad: sin mensajes (total_mensajes=0) primero, con mensajes después.
+    Dentro de cada grupo, los más inactivos primero (NULL antes que fecha antigua).
+    Solo se incluyen usuarios cuyo plazo de MAX_DAYS_INACTIVE_REMOVAL ha expirado.
+    """
     limite = (datetime.now(timezone.utc) - timedelta(days=MAX_DAYS_INACTIVE_REMOVAL)).isoformat()
     cur = _conn.execute("""
         SELECT user_id, nombre, username, total_mensajes, ultimo_mensaje
         FROM   usuarios
-        WHERE  ultimo_mensaje IS NOT NULL
-          AND  ultimo_mensaje < ?
-        ORDER  BY ultimo_mensaje ASC
-    """, (limite,))
+        WHERE  (total_mensajes = 0 AND (ultimo_mensaje IS NULL OR ultimo_mensaje < ?))
+           OR  (total_mensajes > 0 AND ultimo_mensaje IS NOT NULL AND ultimo_mensaje < ?)
+        ORDER BY
+            CASE WHEN total_mensajes = 0 THEN 0 ELSE 1 END ASC,
+            COALESCE(ultimo_mensaje, '1970-01-01') ASC
+        LIMIT 10
+    """, (limite, limite))
     return cur.fetchall()
 
 
@@ -432,14 +440,14 @@ async def enviar_reporte_expulsion(bot) -> None:
     ]
 
     for user_id, nombre, username, total, ultimo in _pendientes_expulsion:
-        dt_ultimo = datetime.fromisoformat(ultimo)
-        alias     = f"@{username}" if username else f"id:{user_id}"
+        alias        = f"@{username}" if username else f"id:{user_id}"
+        ultimo_str   = (datetime.fromisoformat(ultimo).strftime('%d/%m/%Y')
+                        if ultimo else "Nunca")
         lineas.append(
             f"• <b>{_escape_html(nombre)}</b> ({alias})\n"
-            f"  └ Última actividad: {dt_ultimo.strftime('%d/%m/%Y')} | "
-            f"{total:,} mensajes"
+            f"  └ Última actividad: {ultimo_str} | {total:,} mensajes"
         )
-        logger.info(f"  · {nombre} ({alias}) | último: {dt_ultimo.strftime('%d/%m/%Y')} | {total} msgs")
+        logger.info(f"  · {nombre} ({alias}) | último: {ultimo_str} | {total} msgs")
 
     await _send_long_message(bot, ADMIN_ID, "\n".join(lineas), "HTML")
     logger.info(f"[expulsión] Reporte enviado al admin (id={ADMIN_ID}). Esperando /ok ...")
