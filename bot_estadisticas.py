@@ -191,16 +191,18 @@ def obtener_top5() -> list[tuple[int, str, str | None, int, str | None]]:
     return cur.fetchall()
 
 
-def obtener_usuarios_inactivos(dias_warning: int) -> list[tuple[int, str, str | None, int, str]]:
-    """Devuelve usuarios cuyo último mensaje fue hace más de `dias_warning` días."""
+def obtener_usuarios_inactivos(dias_warning: int) -> list[tuple[int, str, str | None, int, str | None]]:
+    """Devuelve usuarios inactivos: sin mensajes (NULL primero) y con mensajes expirados."""
     limite = (datetime.now(timezone.utc) - timedelta(days=dias_warning)).isoformat()
     cur = _conn.execute("""
         SELECT user_id, nombre, username, total_mensajes, ultimo_mensaje
         FROM   usuarios
-        WHERE  ultimo_mensaje IS NOT NULL
-          AND  ultimo_mensaje < ?
-        ORDER  BY ultimo_mensaje ASC
-    """, (limite,))
+        WHERE  (total_mensajes = 0 AND (ultimo_mensaje IS NULL OR ultimo_mensaje < ?))
+           OR  (total_mensajes > 0 AND ultimo_mensaje IS NOT NULL AND ultimo_mensaje < ?)
+        ORDER BY
+            CASE WHEN total_mensajes = 0 THEN 0 ELSE 1 END ASC,
+            COALESCE(ultimo_mensaje, '1970-01-01') ASC
+    """, (limite, limite))
     return cur.fetchall()
 
 
@@ -393,17 +395,21 @@ async def enviar_aviso_inactivos(bot) -> None:
     ]
 
     for user_id, nombre, username, total, ultimo in inactivos:
-        dt_ultimo = datetime.fromisoformat(ultimo)
-        fecha_exp = dt_ultimo + timedelta(days=MAX_DAYS_INACTIVE_REMOVAL)
-        alias     = f"@{username}" if username else f"id:{user_id}"
+        alias = f"@{username}" if username else f"id:{user_id}"
+        if ultimo:
+            dt_ultimo = datetime.fromisoformat(ultimo)
+            fecha_exp_str = (dt_ultimo + timedelta(days=MAX_DAYS_INACTIVE_REMOVAL)).strftime('%d/%m/%Y')
+            ultimo_str    = dt_ultimo.strftime('%d/%m/%Y')
+        else:
+            fecha_exp_str = "Plazo vencido"
+            ultimo_str    = "Nunca"
         lineas.append(
             f"• <b>{_escape_html(nombre)}</b> ({alias}) — "
-            f"fin de plazo: <b>{fecha_exp.strftime('%d/%m/%Y')}</b>"
+            f"fin de plazo: <b>{fecha_exp_str}</b>"
         )
         logger.info(
-            f"  · {nombre} ({alias}) | último mensaje: "
-            f"{dt_ultimo.strftime('%d/%m/%Y')} | "
-            f"expulsión prevista: {fecha_exp.strftime('%d/%m/%Y')}"
+            f"  · {nombre} ({alias}) | último mensaje: {ultimo_str} | "
+            f"expulsión prevista: {fecha_exp_str}"
         )
 
     await _send_long_message(bot, ADMIN_ID, "\n".join(lineas), "HTML")
