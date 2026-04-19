@@ -293,22 +293,15 @@ async def handler_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 def _formatear_usuario(user_id: int, nombre: str,
                         username: str | None, total: int,
                         icono: str) -> str:
-    nombre_safe = (
-        nombre
-        .replace("_", "\\_")
-        .replace("*", "\\*")
-        .replace("[", "\\[")
-        .replace("`", "\\`")
-    )
-    alias = f"@{username}" if username else f"id:{user_id}"
+    alias = f"@{_escape_html(username)}" if username else f"id:{user_id}"
     return (
-        f"{icono} *{nombre_safe}* ({alias})\n"
+        f"{icono} <b>{_escape_html(nombre)}</b> ({alias})\n"
         f"   └ {total:,} mensajes"
     )
 
 
 def _construir_texto_reporte() -> str | None:
-    """Construye el texto Markdown del reporte TOP 5 / DOWN 5. Devuelve None si no hay datos."""
+    """Construye el texto HTML del reporte TOP 5 / DOWN 5. Devuelve None si no hay datos."""
     top5  = obtener_top5()
     down5 = obtener_down5()
 
@@ -319,13 +312,13 @@ def _construir_texto_reporte() -> str | None:
     medallas = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
     calavers = ["💀", "😴", "🐌", "🦥", "👻"]
 
-    lineas = [f"📊 *Estadísticas del grupo* — {ahora}\n"]
+    lineas = [f"📊 <b>Estadísticas del grupo</b> — {ahora}\n"]
 
-    lineas.append("🏆 *Top 5 — Más activos*\n")
+    lineas.append("🏆 <b>Top 5 — Más activos</b>\n")
     for i, (user_id, nombre, username, total, _) in enumerate(top5):
         lineas.append(_formatear_usuario(user_id, nombre, username, total, medallas[i]))
 
-    lineas.append("\n💤 *Down 5 — Menos activos*\n")
+    lineas.append("\n💤 <b>Down 5 — Menos activos</b>\n")
     for i, (user_id, nombre, username, total, _) in enumerate(down5):
         lineas.append(_formatear_usuario(user_id, nombre, username, total, calavers[i]))
 
@@ -619,11 +612,11 @@ async def post_init(application: Application) -> None:
 
     texto = _construir_texto_reporte()
     if texto:
-        nota = f"\n\n_🔄 {mensajes_nuevos:,} mensajes recuperados en este arranque_"
+        nota = f"\n\n<i>🔄 {mensajes_nuevos:,} mensajes recuperados en este arranque</i>"
         await application.bot.send_message(
             chat_id=ADMIN_ID,
             text=texto + nota,
-            parse_mode="Markdown",
+            parse_mode="HTML",
         )
         logger.info(f"[arranque] Reporte enviado al admin (id={ADMIN_ID}).")
 
@@ -648,7 +641,7 @@ async def enviar_resumen_diario(context: ContextTypes.DEFAULT_TYPE) -> None:
     await context.bot.send_message(
         chat_id=ADMIN_ID,
         text=texto,
-        parse_mode="Markdown",
+        parse_mode="HTML",
     )
     logger.info("Resumen diario enviado al admin.")
 
