@@ -192,16 +192,16 @@ def obtener_top5() -> list[tuple[int, str, str | None, int, str | None]]:
 
 
 def obtener_usuarios_inactivos(dias_warning: int) -> list[tuple[int, str, str | None, int, str | None]]:
-    """Devuelve usuarios inactivos: sin mensajes (NULL primero) y con mensajes expirados."""
+    """Devuelve usuarios inactivos: sin mensajes (por fecha_registro) y con mensajes expirados."""
     limite = (datetime.now(timezone.utc) - timedelta(days=dias_warning)).isoformat()
     cur = _conn.execute("""
         SELECT user_id, nombre, username, total_mensajes, ultimo_mensaje
         FROM   usuarios
-        WHERE  (total_mensajes = 0 AND (ultimo_mensaje IS NULL OR ultimo_mensaje < ?))
+        WHERE  (total_mensajes = 0 AND (fecha_registro IS NULL OR fecha_registro < ?))
            OR  (total_mensajes > 0 AND ultimo_mensaje IS NOT NULL AND ultimo_mensaje < ?)
         ORDER BY
             CASE WHEN total_mensajes = 0 THEN 0 ELSE 1 END ASC,
-            COALESCE(ultimo_mensaje, '1970-01-01') ASC
+            COALESCE(fecha_registro, ultimo_mensaje, '1970-01-01') ASC
     """, (limite, limite))
     return cur.fetchall()
 
@@ -209,19 +209,19 @@ def obtener_usuarios_inactivos(dias_warning: int) -> list[tuple[int, str, str | 
 def obtener_usuarios_para_expulsar() -> list[tuple[int, str, str | None, int, str | None]]:
     """Devuelve hasta 10 usuarios a expulsar ordenados por prioridad.
 
-    Prioridad: sin mensajes (total_mensajes=0) primero, con mensajes después.
-    Dentro de cada grupo, los más inactivos primero (NULL antes que fecha antigua).
+    Prioridad: sin mensajes (total_mensajes=0, por fecha_registro) primero, con mensajes después.
+    Dentro de cada grupo, los más inactivos primero.
     Solo se incluyen usuarios cuyo plazo de MAX_DAYS_INACTIVE_REMOVAL ha expirado.
     """
     limite = (datetime.now(timezone.utc) - timedelta(days=MAX_DAYS_INACTIVE_REMOVAL)).isoformat()
     cur = _conn.execute("""
         SELECT user_id, nombre, username, total_mensajes, ultimo_mensaje
         FROM   usuarios
-        WHERE  (total_mensajes = 0 AND (ultimo_mensaje IS NULL OR ultimo_mensaje < ?))
+        WHERE  (total_mensajes = 0 AND (fecha_registro IS NULL OR fecha_registro < ?))
            OR  (total_mensajes > 0 AND ultimo_mensaje IS NOT NULL AND ultimo_mensaje < ?)
         ORDER BY
             CASE WHEN total_mensajes = 0 THEN 0 ELSE 1 END ASC,
-            COALESCE(ultimo_mensaje, '1970-01-01') ASC
+            COALESCE(fecha_registro, ultimo_mensaje, '1970-01-01') ASC
         LIMIT 10
     """, (limite, limite))
     return cur.fetchall()
@@ -487,6 +487,106 @@ async def handler_ok(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 # ---------------------------------------------------------------------------
+# /noparticipa — usuarios sin ningún mensaje
+# ---------------------------------------------------------------------------
+
+def obtener_usuarios_sin_mensajes() -> list[tuple[int, str, str | None, int, str | None]]:
+    """Usuarios con total_mensajes=0 que llevan más de MAX_DAYS_INACTIVE_WARNING días en el grupo."""
+    limite = (datetime.now(timezone.utc) - timedelta(days=MAX_DAYS_INACTIVE_WARNING)).isoformat()
+    cur = _conn.execute("""
+        SELECT user_id, nombre, username, total_mensajes, fecha_registro
+        FROM   usuarios
+        WHERE  total_mensajes = 0
+          AND  (fecha_registro IS NULL OR fecha_registro < ?)
+        ORDER BY COALESCE(fecha_registro, '1970-01-01') ASC
+    """, (limite,))
+    return cur.fetchall()
+
+
+_pendientes_noparticipa: list[tuple[int, str, str | None, int, str | None]] = []
+
+
+async def handler_noparticipa(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    global _pendientes_noparticipa
+    _pendientes_noparticipa = obtener_usuarios_sin_mensajes()
+
+    if not _pendientes_noparticipa:
+        await update.message.reply_text("No hay usuarios sin mensajes que superen el umbral.")
+        return
+
+    lineas = [
+        f"🔇 <b>Usuarios sin ningún mensaje ({len(_pendientes_noparticipa)})</b>\n",
+        f"Llevan más de {MAX_DAYS_INACTIVE_WARNING} días en el grupo sin participar.\n",
+        "Responde /expulsarnoparticipa para expulsarlos.\n",
+    ]
+    for user_id, nombre, username, _, fecha_reg in _pendientes_noparticipa:
+        alias = f"@{username}" if username else f"id:{user_id}"
+        desde = datetime.fromisoformat(fecha_reg).strftime('%d/%m/%Y') if fecha_reg else "desconocido"
+        lineas.append(f"• <b>{_escape_html(nombre)}</b> ({alias}) — en grupo desde: {desde}")
+        logger.info(f"[noparticipa] {nombre} ({alias}) — desde {desde}")
+
+    await _send_long_message(context.bot, ADMIN_ID, "\n".join(lineas), "HTML")
+
+
+async def handler_expulsarnoparticipa(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    global _pendientes_noparticipa
+
+    if not _pendientes_noparticipa:
+        await update.message.reply_text("No hay usuarios pendientes. Ejecuta /noparticipa primero.")
+        return
+
+    expulsados = []
+    errores    = []
+
+    for user_id, nombre, username, _, _ in _pendientes_noparticipa:
+        alias = f"@{username}" if username else f"id:{user_id}"
+        try:
+            await context.bot.ban_chat_member(chat_id=GRUPO_ID, user_id=user_id)
+            await context.bot.unban_chat_member(chat_id=GRUPO_ID, user_id=user_id)
+            eliminar_miembro(user_id)
+            expulsados.append(f"• {_escape_html(nombre)} ({alias})")
+            logger.info(f"[noparticipa] Expulsado: {nombre} ({alias})")
+        except Exception as exc:
+            errores.append(f"• {_escape_html(nombre)} ({alias}): {_escape_html(str(exc))}")
+            logger.warning(f"[noparticipa] Error al expulsar {nombre} ({alias}): {exc}")
+
+    _pendientes_noparticipa.clear()
+
+    lineas = [f"✅ <b>{len(expulsados)} usuario(s) expulsados:</b>\n"] + expulsados
+    if errores:
+        lineas += [f"\n⚠️ <b>{len(errores)} error(es):</b>\n"] + errores
+
+    await _send_long_message(context.bot, ADMIN_ID, "\n".join(lineas), "HTML")
+
+
+# ---------------------------------------------------------------------------
+# /moratoria — resetear inactividad de todos los inactivos a hoy
+# ---------------------------------------------------------------------------
+
+def resetear_inactividad() -> int:
+    """Actualiza ultimo_mensaje a ahora para todos los usuarios inactivos. Devuelve filas afectadas."""
+    limite = (datetime.now(timezone.utc) - timedelta(days=MAX_DAYS_INACTIVE_WARNING)).isoformat()
+    ahora  = datetime.now(timezone.utc).isoformat()
+    cur = _conn.execute("""
+        UPDATE usuarios
+        SET    ultimo_mensaje = ?
+        WHERE  (total_mensajes > 0 AND ultimo_mensaje < ?)
+           OR  (total_mensajes = 0 AND (fecha_registro IS NULL OR fecha_registro < ?))
+    """, (ahora, limite, limite))
+    _conn.commit()
+    return cur.rowcount
+
+
+async def handler_moratoria(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    afectados = resetear_inactividad()
+    logger.info(f"[moratoria] Inactividad reseteada para {afectados} usuario(s).")
+    await update.message.reply_text(
+        f"✅ Moratoria aplicada. {afectados} usuario(s) con inactividad reseteada a hoy.\n"
+        "El contador de inactividad empieza desde ahora para todos ellos."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Arranque: recuperar mensajes perdidos y enviar reporte al admin
 # ---------------------------------------------------------------------------
 
@@ -670,19 +770,17 @@ def main() -> None:
     app.add_handler(
         ChatMemberHandler(handler_miembro, ChatMemberHandler.CHAT_MEMBER)
     )
-    app.add_handler(
-        MessageHandler(
-            (filters.TEXT | filters.PHOTO | filters.VIDEO) & filters.ChatType.GROUPS,
-            handler_mensaje,
-        )
-    )
-    app.add_handler(
-        CommandHandler(
-            "ok",
-            handler_ok,
-            filters=filters.ChatType.PRIVATE & filters.User(ADMIN_ID),
-        )
-    )
+    _filtro_actividad = (
+        filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL
+        | filters.AUDIO | filters.ANIMATION | filters.VOICE | filters.VIDEO_NOTE
+    ) & filters.ChatType.GROUPS
+    app.add_handler(MessageHandler(_filtro_actividad, handler_mensaje))
+
+    _admin_privado = filters.ChatType.PRIVATE & filters.User(ADMIN_ID)
+    app.add_handler(CommandHandler("ok",                   handler_ok,                   filters=_admin_privado))
+    app.add_handler(CommandHandler("noparticipa",          handler_noparticipa,          filters=_admin_privado))
+    app.add_handler(CommandHandler("expulsarnoparticipa",  handler_expulsarnoparticipa,  filters=_admin_privado))
+    app.add_handler(CommandHandler("moratoria",            handler_moratoria,            filters=_admin_privado))
 
     job_queue = app.job_queue
     job_queue.run_daily(
