@@ -587,6 +587,28 @@ async def handler_moratoria(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 # ---------------------------------------------------------------------------
+# /report — reporte manual bajo demanda
+# ---------------------------------------------------------------------------
+
+async def handler_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Envía al admin el reporte TOP5/DOWN5, aviso de inactivos y candidatos a expulsión."""
+    texto = _construir_texto_reporte()
+    if not texto:
+        await update.message.reply_text("Sin datos en la BD.")
+        return
+
+    top5  = obtener_top5()
+    down5 = obtener_down5()
+    _loguear_reporte(top5, down5)
+
+    await _send_long_message(context.bot, ADMIN_ID, texto, "HTML")
+    logger.info(f"[report] Reporte enviado al admin (id={ADMIN_ID}).")
+
+    await enviar_aviso_inactivos(context.bot)
+    await enviar_reporte_expulsion(context.bot)
+
+
+# ---------------------------------------------------------------------------
 # Arranque: recuperar mensajes perdidos y enviar reporte al admin
 # ---------------------------------------------------------------------------
 
@@ -781,6 +803,7 @@ def main() -> None:
     app.add_handler(CommandHandler("noparticipa",          handler_noparticipa,          filters=_admin_privado))
     app.add_handler(CommandHandler("expulsarnoparticipa",  handler_expulsarnoparticipa,  filters=_admin_privado))
     app.add_handler(CommandHandler("moratoria",            handler_moratoria,            filters=_admin_privado))
+    app.add_handler(CommandHandler("report",               handler_report,               filters=_admin_privado))
 
     job_queue = app.job_queue
     job_queue.run_daily(
