@@ -186,10 +186,10 @@ def registrar_mensaje(user_id: int,
         _ultimo_registro = fecha
 
 
-def obtener_top5() -> list[tuple[int, str, str | None, int, str | None]]:
+def obtener_top5() -> list[tuple[int, str, str | None, int, str | None, str | None]]:
     """Devuelve los 5 usuarios con más mensajes ordenados de mayor a menor."""
     cur = _conn.execute("""
-        SELECT user_id, nombre, username, total_mensajes, ultimo_mensaje
+        SELECT user_id, nombre, username, total_mensajes, ultimo_mensaje, fecha_registro
         FROM   usuarios
         ORDER  BY total_mensajes DESC
         LIMIT  5
@@ -197,11 +197,11 @@ def obtener_top5() -> list[tuple[int, str, str | None, int, str | None]]:
     return cur.fetchall()
 
 
-def obtener_usuarios_inactivos(dias_warning: int) -> list[tuple[int, str, str | None, int, str | None]]:
+def obtener_usuarios_inactivos(dias_warning: int) -> list[tuple[int, str, str | None, int, str | None, str | None]]:
     """Devuelve usuarios inactivos: sin mensajes (por fecha_registro) y con mensajes expirados."""
     limite = (datetime.now(timezone.utc) - timedelta(days=dias_warning)).isoformat()
     cur = _conn.execute("""
-        SELECT user_id, nombre, username, total_mensajes, ultimo_mensaje
+        SELECT user_id, nombre, username, total_mensajes, ultimo_mensaje, fecha_registro
         FROM   usuarios
         WHERE  (total_mensajes = 0 AND (fecha_registro IS NULL OR fecha_registro < ?))
            OR  (total_mensajes > 0 AND ultimo_mensaje IS NOT NULL AND ultimo_mensaje < ?)
@@ -212,7 +212,7 @@ def obtener_usuarios_inactivos(dias_warning: int) -> list[tuple[int, str, str | 
     return cur.fetchall()
 
 
-def obtener_usuarios_para_expulsar() -> list[tuple[int, str, str | None, int, str | None]]:
+def obtener_usuarios_para_expulsar() -> list[tuple[int, str, str | None, int, str | None, str | None]]:
     """Devuelve hasta 10 usuarios a expulsar ordenados por prioridad.
 
     Prioridad: sin mensajes (total_mensajes=0, por fecha_registro) primero, con mensajes después.
@@ -221,7 +221,7 @@ def obtener_usuarios_para_expulsar() -> list[tuple[int, str, str | None, int, st
     """
     limite = (datetime.now(timezone.utc) - timedelta(days=MAX_DAYS_INACTIVE_REMOVAL)).isoformat()
     cur = _conn.execute("""
-        SELECT user_id, nombre, username, total_mensajes, ultimo_mensaje
+        SELECT user_id, nombre, username, total_mensajes, ultimo_mensaje, fecha_registro
         FROM   usuarios
         WHERE  (total_mensajes = 0 AND (fecha_registro IS NULL OR fecha_registro < ?))
            OR  (total_mensajes > 0 AND ultimo_mensaje IS NOT NULL AND ultimo_mensaje < ?)
@@ -237,14 +237,14 @@ def obtener_usuarios_para_expulsar() -> list[tuple[int, str, str | None, int, st
 _pendientes_expulsion: list[tuple[int, str, str | None, int, str]] = []
 
 
-def obtener_down5() -> list[tuple[int, str, str | None, int, str | None]]:
+def obtener_down5() -> list[tuple[int, str, str | None, int, str | None, str | None]]:
     """
     Devuelve los 5 usuarios menos activos con prioridad:
     1. Usuarios con 0 mensajes (ghosts), los más antiguos primero (por fecha_registro).
     2. Usuarios con mensajes, los que tienen menos mensajes y llevan más tiempo sin hablar.
     """
     cur = _conn.execute("""
-        SELECT user_id, nombre, username, total_mensajes, ultimo_mensaje
+        SELECT user_id, nombre, username, total_mensajes, ultimo_mensaje, fecha_registro
         FROM   usuarios
         ORDER  BY
             CASE WHEN total_mensajes = 0 THEN 0 ELSE 1 END ASC,
@@ -308,11 +308,32 @@ async def handler_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 def _formatear_usuario(user_id: int, nombre: str,
                         username: str | None, total: int,
-                        icono: str) -> str:
+                        icono: str, ultimo: str | None, registro: str | None) -> str:
     alias = f"@{_escape_html(username)}" if username else f"id:{user_id}"
+    ahora = datetime.now(timezone.utc)
+
+    registro_str = "Desconocida"
+    if registro:
+        try:
+            dt_reg = datetime.fromisoformat(registro)
+            registro_str = dt_reg.strftime("%d/%m/%Y")
+        except Exception:
+            pass
+
+    actividad_str = "Nunca"
+    if ultimo:
+        try:
+            dt_ult = datetime.fromisoformat(ultimo)
+            dias = (ahora - dt_ult).days
+            actividad_str = f"{dt_ult.strftime('%d/%m/%Y')} ({dias} días)"
+        except Exception:
+            pass
+
     return (
         f"{icono} <b>{_escape_html(nombre)}</b> ({alias})\n"
-        f"   └ {total:,} mensajes"
+        f"   ├ Mensajes: {total:,}\n"
+        f"   ├ Registro: {registro_str}\n"
+        f"   └ Última act.: {actividad_str}"
     )
 
 
@@ -321,8 +342,8 @@ def _construir_seccion_top5(top5: list) -> str:
     medallas = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
     lineas = [f"📊 <b>Estadísticas del grupo</b> — {ahora}\n"]
     lineas.append("🏆 <b>Top 5 — Más activos</b>\n")
-    for i, (user_id, nombre, username, total, _) in enumerate(top5):
-        lineas.append(_formatear_usuario(user_id, nombre, username, total, medallas[i]))
+    for i, (user_id, nombre, username, total, ultimo, registro) in enumerate(top5):
+        lineas.append(_formatear_usuario(user_id, nombre, username, total, medallas[i], ultimo, registro))
     return "\n".join(lineas)
 
 
@@ -331,8 +352,8 @@ def _construir_seccion_down5(down5: list) -> str:
     calavers = ["💀", "😴", "🐌", "🦥", "👻"]
     lineas = [f"📊 <b>Estadísticas del grupo</b> — {ahora}\n"]
     lineas.append("💤 <b>Down 5 — Menos activos</b>\n")
-    for i, (user_id, nombre, username, total, _) in enumerate(down5):
-        lineas.append(_formatear_usuario(user_id, nombre, username, total, calavers[i]))
+    for i, (user_id, nombre, username, total, ultimo, registro) in enumerate(down5):
+        lineas.append(_formatear_usuario(user_id, nombre, username, total, calavers[i], ultimo, registro))
     return "\n".join(lineas)
 
 
@@ -351,12 +372,12 @@ def _construir_texto_reporte() -> str | None:
     lineas = [f"📊 <b>Estadísticas del grupo</b> — {ahora}\n"]
 
     lineas.append("🏆 <b>Top 5 — Más activos</b>\n")
-    for i, (user_id, nombre, username, total, _) in enumerate(top5):
-        lineas.append(_formatear_usuario(user_id, nombre, username, total, medallas[i]))
+    for i, (user_id, nombre, username, total, ultimo, registro) in enumerate(top5):
+        lineas.append(_formatear_usuario(user_id, nombre, username, total, medallas[i], ultimo, registro))
 
     lineas.append("\n💤 <b>Down 5 — Menos activos</b>\n")
-    for i, (user_id, nombre, username, total, _) in enumerate(down5):
-        lineas.append(_formatear_usuario(user_id, nombre, username, total, calavers[i]))
+    for i, (user_id, nombre, username, total, ultimo, registro) in enumerate(down5):
+        lineas.append(_formatear_usuario(user_id, nombre, username, total, calavers[i], ultimo, registro))
 
     return "\n".join(lineas)
 
@@ -364,11 +385,11 @@ def _construir_texto_reporte() -> str | None:
 def _loguear_reporte(top5, down5) -> None:
     logger.info("=== TOP 5 — Más activos ===")
     medallas = ["1º", "2º", "3º", "4º", "5º"]
-    for i, (user_id, nombre, username, total, _) in enumerate(top5):
+    for i, (user_id, nombre, username, total, _, _) in enumerate(top5):
         alias = f"@{username}" if username else f"id:{user_id}"
         logger.info(f"  {medallas[i]} {nombre} ({alias}) — {total:,} mensajes")
     logger.info("=== DOWN 5 — Menos activos ===")
-    for i, (user_id, nombre, username, total, _) in enumerate(down5):
+    for i, (user_id, nombre, username, total, _, _) in enumerate(down5):
         alias = f"@{username}" if username else f"id:{user_id}"
         logger.info(f"  {i+1}. {nombre} ({alias}) — {total:,} mensajes")
 
@@ -428,7 +449,7 @@ async def enviar_aviso_inactivos(bot) -> None:
         "Si no es el momento, las puertas estarán abiertas para cuando decidáis volver.\n",
     ]
 
-    for user_id, nombre, username, total, ultimo in inactivos:
+    for user_id, nombre, username, total, ultimo, registro in inactivos:
         alias = f"@{username}" if username else f"id:{user_id}"
         if ultimo:
             dt_ultimo = datetime.fromisoformat(ultimo)
@@ -472,7 +493,7 @@ async def enviar_reporte_expulsion(bot) -> None:
         "Responde /ok para expulsarlos del grupo.\n",
     ]
 
-    for user_id, nombre, username, total, ultimo in _pendientes_expulsion:
+    for user_id, nombre, username, total, ultimo, registro in _pendientes_expulsion:
         alias        = f"@{username}" if username else f"id:{user_id}"
         ultimo_str   = (datetime.fromisoformat(ultimo).strftime('%d/%m/%Y')
                         if ultimo else "Nunca")
@@ -498,7 +519,7 @@ async def handler_ok(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     expulsados = []
     errores    = []
 
-    for user_id, nombre, username, total, _ in _pendientes_expulsion:
+    for user_id, nombre, username, total, _, _ in _pendientes_expulsion:
         alias = f"@{username}" if username else f"id:{user_id}"
         try:
             # Ban + unban inmediato: expulsa pero permite volver en el futuro
@@ -672,7 +693,7 @@ async def handler_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 # Usuarios pendientes de expulsión vía /kick DOWN
-_pendientes_kick: list[tuple[int, str, str | None, int, str | None]] = []
+_pendientes_kick: list[tuple[int, str, str | None, int, str | None, str | None]] = []
 
 
 async def handler_kick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -693,7 +714,7 @@ async def handler_kick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     lineas = ["⚠️ <b>¿Expulsar a los usuarios menos activos?</b>\n"]
-    for i, (user_id, nombre, username, total, ultimo) in enumerate(_pendientes_kick):
+    for i, (user_id, nombre, username, total, ultimo, registro) in enumerate(_pendientes_kick):
         alias = f"@{username}" if username else f"id:{user_id}"
         icono = "👻" if total == 0 else "💤"
         lineas.append(f"{icono} <b>{_escape_html(nombre)}</b> ({alias}) — {total:,} msgs")
@@ -728,7 +749,7 @@ async def handler_callback_kick(update: Update, context: ContextTypes.DEFAULT_TY
         expulsados = []
         errores    = []
 
-        for user_id, nombre, username, _, _ in _pendientes_kick:
+        for user_id, nombre, username, _, _, _ in _pendientes_kick:
             alias = f"@{username}" if username else f"id:{user_id}"
             try:
                 # Ban + unban inmediato para permitir reentrada futura
@@ -820,7 +841,7 @@ async def enviar_resumen_recuperados(bot, recuperados: list[tuple]) -> None:
         "Los siguientes usuarios estaban inactivos pero han registrado actividad "
         "mientras el bot estaba detenido.\n",
     ]
-    for user_id, nombre, username, total, ultimo in recuperados:
+    for user_id, nombre, username, total, ultimo, registro in recuperados:
         alias = f"@{username}" if username else f"id:{user_id}"
         dt    = datetime.fromisoformat(ultimo)
         lineas.append(
