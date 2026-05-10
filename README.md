@@ -1,19 +1,20 @@
 # Stats Bot
 
 Bot de Telegram que registra la actividad de un grupo y envía un reporte diario con el **Top 5 de usuarios más activos**.
-
 ## Funcionalidades
 
-- Escucha y contabiliza todos los mensajes de texto del grupo en tiempo real.
-- Envía automáticamente un resumen diario al grupo a las **10:00 UTC**.
+- Escucha y contabiliza todos los mensajes (texto, fotos, vídeos, etc.) del grupo en tiempo real.
+- Envía automáticamente un resumen de actividad al **administrador** diariamente.
+- Gestión de inactividad: identifica usuarios que no participan y genera reportes de expulsión.
 - Soporte para inicializar la base de datos con el historial completo del grupo (mediante Telethon).
 
 ## Requisitos previos
 
 - Cuenta de Telegram y acceso al grupo donde se desplegará el bot.
 - **Bot Token** — obtenido desde [@BotFather](https://t.me/BotFather).
+- **ID del Administrador** — tu ID numérico de Telegram (puedes obtenerlo de [@userinfobot](https://t.me/userinfobot)).
 - **API ID y API Hash** — obtenidos desde [my.telegram.org/apps](https://my.telegram.org/apps) (solo necesarios para la inicialización del historial).
-- El bot debe ser **administrador** del grupo para poder leer mensajes.
+- El bot debe ser **administrador** del grupo para poder leer mensajes y gestionar miembros.
 
 ## Configuración
 
@@ -23,17 +24,36 @@ Copia el archivo de ejemplo y completa los valores:
 cp .env.example .env
 ```
 
-| Variable   | Descripción                                              | Ejemplo                              |
-|------------|----------------------------------------------------------|--------------------------------------|
-| `BOT_TOKEN` | Token del bot de [@BotFather](https://t.me/BotFather)  | `123456789:AAFxxx...`                |
-| `GRUPO_ID`  | ID numérico del grupo (negativo en supergrupos)         | `-1001234567890`                     |
-| `API_ID`    | API ID de [my.telegram.org](https://my.telegram.org/apps) | `12345678`                        |
-| `API_HASH`  | API Hash de [my.telegram.org](https://my.telegram.org/apps) | `abcdef1234...`                  |
+| Variable | Descripción | Ejemplo |
+| :--- | :--- | :--- |
+| `BOT_TOKEN` | Token del bot de [@BotFather](https://t.me/BotFather) | `123456789:AAFxxx...` |
+| `GRUPO_ID` | ID numérico del grupo (negativo en supergrupos) | `-1001234567890` |
+| `ADMIN_ID` | Tu ID de Telegram para recibir reportes y usar comandos | `987654321` |
+| `API_ID` | API ID de [my.telegram.org](https://my.telegram.org/apps) | `12345678` |
+| `API_HASH` | API Hash de [my.telegram.org](https://my.telegram.org/apps) | `abcdef1234...` |
+| `MAX_DAYS_INACTIVE_WARNING` | Días de inactividad para entrar en la lista de aviso | `30` |
+| `MAX_DAYS_INACTIVE_REMOVAL` | Días de inactividad para ser candidato a expulsión | `60` |
 
 > `API_ID` y `API_HASH` solo son necesarios para ejecutar `init_historial.py`.
 
-## Ejecución con Docker (recomendado)
+## Comandos del Administrador
 
+Estos comandos solo funcionan si se envían al bot por **chat privado** y por el usuario definido en `ADMIN_ID`.
+
+| Comando | Acción |
+| :--- | :--- |
+| `/report` | Genera el reporte completo (TOP+DOWN) y el estado de inactividad. |
+| `/report TOP` | Genera únicamente el reporte de los 5 usuarios más activos. |
+| `/report DOWN` | Genera únicamente el reporte de los 5 usuarios menos activos. |
+| `/kick DOWN` | Identifica a los usuarios menos activos y permite expulsarlos tras confirmación con botones. |
+| `/ok` | Ejecuta la expulsión de los usuarios listados en el último reporte de expulsión. |
+| `/noparticipa` | Lista los usuarios con 0 mensajes que llevan inactivos más de `MAX_DAYS_INACTIVE_WARNING` días. |
+| `/expulsarnoparticipa` | Expulsa a los usuarios identificados con `/noparticipa`. |
+| `/moratoria` | Resetea el contador de inactividad de todos los usuarios actuales a la fecha de hoy. |
+
+---
+
+## Ejecución con Docker (recomendado)
 ### 1. Construir la imagen
 
 ```bash

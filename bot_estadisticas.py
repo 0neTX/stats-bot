@@ -26,13 +26,19 @@ import sqlite3
 from datetime import datetime, time, timedelta, timezone
 
 from dotenv import load_dotenv
-from telegram import Update, ChatMemberUpdated
+from telegram import (
+    Update,
+    ChatMemberUpdated,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
 from telegram.ext import (
     Application,
     ChatMemberHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
+    CallbackQueryHandler,
     filters,
 )
 from telethon import TelegramClient
@@ -232,11 +238,19 @@ _pendientes_expulsion: list[tuple[int, str, str | None, int, str]] = []
 
 
 def obtener_down5() -> list[tuple[int, str, str | None, int, str | None]]:
-    """Devuelve los 5 usuarios con menos mensajes ordenados de menor a mayor."""
+    """
+    Devuelve los 5 usuarios menos activos con prioridad:
+    1. Usuarios con 0 mensajes (ghosts), los más antiguos primero (por fecha_registro).
+    2. Usuarios con mensajes, los que tienen menos mensajes y llevan más tiempo sin hablar.
+    """
     cur = _conn.execute("""
         SELECT user_id, nombre, username, total_mensajes, ultimo_mensaje
         FROM   usuarios
-        ORDER  BY total_mensajes ASC
+        ORDER  BY
+            CASE WHEN total_mensajes = 0 THEN 0 ELSE 1 END ASC,
+            CASE WHEN total_mensajes = 0 THEN COALESCE(fecha_registro, '1970-01-01') 
+                 ELSE total_mensajes END ASC,
+            COALESCE(ultimo_mensaje, '1970-01-01') ASC
         LIMIT  5
     """)
     return cur.fetchall()
@@ -302,8 +316,28 @@ def _formatear_usuario(user_id: int, nombre: str,
     )
 
 
+def _construir_seccion_top5(top5: list) -> str:
+    ahora    = datetime.now(tz=timezone.utc).strftime("%d/%m/%Y %H:%M UTC")
+    medallas = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
+    lineas = [f"📊 <b>Estadísticas del grupo</b> — {ahora}\n"]
+    lineas.append("🏆 <b>Top 5 — Más activos</b>\n")
+    for i, (user_id, nombre, username, total, _) in enumerate(top5):
+        lineas.append(_formatear_usuario(user_id, nombre, username, total, medallas[i]))
+    return "\n".join(lineas)
+
+
+def _construir_seccion_down5(down5: list) -> str:
+    ahora    = datetime.now(tz=timezone.utc).strftime("%d/%m/%Y %H:%M UTC")
+    calavers = ["💀", "😴", "🐌", "🦥", "👻"]
+    lineas = [f"📊 <b>Estadísticas del grupo</b> — {ahora}\n"]
+    lineas.append("💤 <b>Down 5 — Menos activos</b>\n")
+    for i, (user_id, nombre, username, total, _) in enumerate(down5):
+        lineas.append(_formatear_usuario(user_id, nombre, username, total, calavers[i]))
+    return "\n".join(lineas)
+
+
 def _construir_texto_reporte() -> str | None:
-    """Construye el texto HTML del reporte TOP 5 / DOWN 5. Devuelve None si no hay datos."""
+    """Construye el texto HTML completo del reporte TOP 5 + DOWN 5."""
     top5  = obtener_top5()
     down5 = obtener_down5()
 
@@ -591,7 +625,36 @@ async def handler_moratoria(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 # ---------------------------------------------------------------------------
 
 async def handler_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Envía al admin el reporte TOP5/DOWN5, aviso de inactivos y candidatos a expulsión."""
+    """
+    Envía reportes de actividad. Soporta subcomandos:
+    /report      -> Reporte completo (TOP+DOWN) + inactividad
+    /report TOP  -> Solo TOP 5
+    /report DOWN -> Solo DOWN 5
+    """
+    args = context.args
+    subcomando = args[0].upper() if args else None
+
+    if subcomando == "TOP":
+        top5 = obtener_top5()
+        if not top5:
+            await update.message.reply_text("Sin datos en la BD.")
+            return
+        texto = _construir_seccion_top5(top5)
+        await update.message.reply_html(texto)
+        logger.info(f"[report] Subcomando TOP enviado al admin (id={ADMIN_ID}).")
+        return
+
+    if subcomando == "DOWN":
+        down5 = obtener_down5()
+        if not down5:
+            await update.message.reply_text("Sin datos en la BD.")
+            return
+        texto = _construir_seccion_down5(down5)
+        await update.message.reply_html(texto)
+        logger.info(f"[report] Subcomando DOWN enviado al admin (id={ADMIN_ID}).")
+        return
+
+    # Reporte completo (sin argumentos o argumento desconocido)
     texto = _construir_texto_reporte()
     if not texto:
         await update.message.reply_text("Sin datos en la BD.")
@@ -602,10 +665,87 @@ async def handler_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     _loguear_reporte(top5, down5)
 
     await _send_long_message(context.bot, ADMIN_ID, texto, "HTML")
-    logger.info(f"[report] Reporte enviado al admin (id={ADMIN_ID}).")
+    logger.info(f"[report] Reporte completo enviado al admin (id={ADMIN_ID}).")
 
     await enviar_aviso_inactivos(context.bot)
     await enviar_reporte_expulsion(context.bot)
+
+
+# Usuarios pendientes de expulsión vía /kick DOWN
+_pendientes_kick: list[tuple[int, str, str | None, int, str | None]] = []
+
+
+async def handler_kick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Identifica a los usuarios menos activos y pide confirmación para expulsarlos.
+    Uso: /kick DOWN
+    """
+    args = context.args
+    if not args or args[0].upper() != "DOWN":
+        await update.message.reply_text("Uso: /kick DOWN")
+        return
+
+    global _pendientes_kick
+    _pendientes_kick = obtener_down5()
+
+    if not _pendientes_kick:
+        await update.message.reply_text("No hay usuarios para expulsar.")
+        return
+
+    lineas = ["⚠️ <b>¿Expulsar a los usuarios menos activos?</b>\n"]
+    for i, (user_id, nombre, username, total, ultimo) in enumerate(_pendientes_kick):
+        alias = f"@{username}" if username else f"id:{user_id}"
+        icono = "👻" if total == 0 else "💤"
+        lineas.append(f"{icono} <b>{_escape_html(nombre)}</b> ({alias}) — {total:,} msgs")
+
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Confirmar", callback_data="kick_confirm"),
+            InlineKeyboardButton("❌ Cancelar", callback_data="kick_cancel"),
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_html("\n".join(lineas), reply_markup=reply_markup)
+
+
+async def handler_callback_kick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Maneja la respuesta de los botones de confirmación de /kick."""
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "kick_cancel":
+        global _pendientes_kick
+        _pendientes_kick = []
+        await query.edit_message_text("❌ Operación cancelada.")
+        return
+
+    if query.data == "kick_confirm":
+        if not _pendientes_kick:
+            await query.edit_message_text("No hay usuarios pendientes de expulsión.")
+            return
+
+        expulsados = []
+        errores    = []
+
+        for user_id, nombre, username, _, _ in _pendientes_kick:
+            alias = f"@{username}" if username else f"id:{user_id}"
+            try:
+                # Ban + unban inmediato para permitir reentrada futura
+                await context.bot.ban_chat_member(chat_id=GRUPO_ID, user_id=user_id)
+                await context.bot.unban_chat_member(chat_id=GRUPO_ID, user_id=user_id)
+                eliminar_miembro(user_id)
+                expulsados.append(f"• {_escape_html(nombre)} ({alias})")
+            except Exception as exc:
+                errores.append(f"• {_escape_html(nombre)} ({alias}): {str(exc)}")
+
+        _pendientes_kick = []
+
+        resultado = [f"✅ <b>{len(expulsados)} usuario(s) expulsados:</b>\n"] + expulsados
+        if errores:
+            resultado += [f"\n⚠️ <b>{len(errores)} error(es):</b>\n"] + errores
+
+        await query.edit_message_text("\n".join(resultado), parse_mode="HTML")
 
 
 # ---------------------------------------------------------------------------
@@ -804,6 +944,9 @@ def main() -> None:
     app.add_handler(CommandHandler("expulsarnoparticipa",  handler_expulsarnoparticipa,  filters=_admin_privado))
     app.add_handler(CommandHandler("moratoria",            handler_moratoria,            filters=_admin_privado))
     app.add_handler(CommandHandler("report",               handler_report,               filters=_admin_privado))
+    app.add_handler(CommandHandler("kick",                 handler_kick,                 filters=_admin_privado))
+
+    app.add_handler(CallbackQueryHandler(handler_callback_kick, pattern="^kick_"))
 
     job_queue = app.job_queue
     job_queue.run_daily(
