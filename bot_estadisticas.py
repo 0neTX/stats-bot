@@ -188,6 +188,31 @@ def registrar_mensaje(user_id: int,
         _ultimo_registro = fecha
 
 
+def registrar_actividad_recovery(user_id: int,
+                                 nombre: str,
+                                 username: str | None,
+                                 fecha: datetime) -> None:
+    """Igual que registrar_mensaje pero NO incrementa total_mensajes en usuarios ya existentes.
+    Usar en recuperaciones históricas para evitar doble conteo."""
+    global _ultimo_registro
+    fecha_str = fecha.isoformat()
+    ahora     = datetime.now(timezone.utc).isoformat()
+    _conn.execute("""
+        INSERT INTO usuarios
+            (user_id, nombre, username, total_mensajes, ultimo_mensaje, fecha_registro)
+        VALUES (?, ?, ?, 1, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            nombre         = excluded.nombre,
+            username       = excluded.username,
+            ultimo_mensaje = CASE WHEN excluded.ultimo_mensaje > COALESCE(ultimo_mensaje, '')
+                                 THEN excluded.ultimo_mensaje
+                                 ELSE ultimo_mensaje END
+    """, (user_id, nombre, username, fecha_str, ahora))
+    _conn.commit()
+    if _ultimo_registro is None or fecha > _ultimo_registro:
+        _ultimo_registro = fecha
+
+
 def obtener_top5() -> list[tuple[int, str, str | None, int, str | None, str | None]]:
     """Devuelve los 5 usuarios con más mensajes ordenados de mayor a menor."""
     cur = _conn.execute("""
@@ -617,6 +642,70 @@ async def handler_expulsarnoparticipa(update: Update, context: ContextTypes.DEFA
 
 
 # ---------------------------------------------------------------------------
+# /recalcularfechas — re-escanear historial para corregir ultimo_mensaje
+# ---------------------------------------------------------------------------
+
+async def handler_recalcularfechas(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Re-escanea el historial del grupo desde una fecha dada para corregir ultimo_mensaje.
+    Uso: /recalcularfechas [YYYY-MM-DD]  (por defecto: hace 365 días)
+    No modifica total_mensajes; solo actualiza fechas de última actividad."""
+    args = context.args
+    if args:
+        try:
+            desde = datetime.fromisoformat(args[0]).replace(tzinfo=timezone.utc)
+        except ValueError:
+            await update.message.reply_text(
+                "Formato inválido. Usa: /recalcularfechas YYYY-MM-DD\n"
+                "Ejemplo: /recalcularfechas 2024-12-13"
+            )
+            return
+    else:
+        desde = datetime.now(timezone.utc) - timedelta(days=365)
+
+    await update.message.reply_text(
+        f"⏳ Recalculando fechas desde {desde.strftime('%d/%m/%Y')}...\n"
+        "Esto puede tardar unos minutos."
+    )
+
+    total  = 0
+    activos: set[int] = set()
+    try:
+        async with TelegramClient(SESSION_NAME, API_ID, API_HASH) as client:
+            async for mensaje in client.iter_messages(GRUPO_ID):
+                if mensaje.date <= desde:
+                    break
+                if not mensaje.sender or not isinstance(mensaje.sender, TelethonUser):
+                    continue
+                if mensaje.sender.bot:
+                    continue
+                tiene_contenido = (
+                    bool(mensaje.text)
+                    or mensaje.photo is not None
+                    or mensaje.video is not None
+                )
+                if not tiene_contenido:
+                    continue
+                remitente = mensaje.sender
+                nombre = (
+                    f"{remitente.first_name or ''} {remitente.last_name or ''}".strip()
+                    or str(remitente.id)
+                )
+                registrar_actividad_recovery(remitente.id, nombre, remitente.username, mensaje.date)
+                activos.add(remitente.id)
+                total += 1
+    except Exception as exc:
+        logger.warning(f"[recalcularfechas] Error Telethon: {exc}")
+        await update.message.reply_text(f"❌ Error al conectar con Telethon: {exc}")
+        return
+
+    logger.info(f"[recalcularfechas] {total:,} mensajes, {len(activos)} usuarios actualizados.")
+    await update.message.reply_text(
+        f"✅ Recalculación completada.\n"
+        f"{total:,} mensajes procesados · {len(activos)} usuarios actualizados."
+    )
+
+
+# ---------------------------------------------------------------------------
 # /moratoria — resetear inactividad de todos los inactivos a hoy
 # ---------------------------------------------------------------------------
 
@@ -819,7 +908,7 @@ async def actualizar_desde_ultima_ejecucion() -> tuple[int, set[int]]:
                     f"{remitente.first_name or ''} {remitente.last_name or ''}".strip()
                     or str(remitente.id)
                 )
-                registrar_mensaje(remitente.id, nombre, remitente.username, mensaje.date)
+                registrar_actividad_recovery(remitente.id, nombre, remitente.username, mensaje.date)
                 activos.add(remitente.id)
                 total += 1
 
@@ -966,6 +1055,7 @@ def main() -> None:
     app.add_handler(CommandHandler("noparticipa",          handler_noparticipa,          filters=_admin_privado))
     app.add_handler(CommandHandler("expulsarnoparticipa",  handler_expulsarnoparticipa,  filters=_admin_privado))
     app.add_handler(CommandHandler("moratoria",            handler_moratoria,            filters=_admin_privado))
+    app.add_handler(CommandHandler("recalcularfechas",     handler_recalcularfechas,     filters=_admin_privado))
     app.add_handler(CommandHandler("report",               handler_report,               filters=_admin_privado))
     app.add_handler(CommandHandler("kick",                 handler_kick,                 filters=_admin_privado))
 
