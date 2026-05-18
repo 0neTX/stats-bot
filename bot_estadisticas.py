@@ -178,7 +178,9 @@ def registrar_mensaje(user_id: int,
             nombre         = excluded.nombre,
             username       = excluded.username,
             total_mensajes = total_mensajes + 1,
-            ultimo_mensaje = excluded.ultimo_mensaje
+            ultimo_mensaje = CASE WHEN excluded.ultimo_mensaje > COALESCE(ultimo_mensaje, '')
+                                 THEN excluded.ultimo_mensaje
+                                 ELSE ultimo_mensaje END
     """, (user_id, nombre, username, fecha_str, ahora))
     _conn.commit()
     # Actualizar el último registro procesado en memoria
