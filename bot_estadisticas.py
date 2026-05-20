@@ -71,6 +71,10 @@ SESSION_NAME = "sesion_admin"
 MAX_DAYS_INACTIVE_WARNING  = int(os.getenv("MAX_DAYS_INACTIVE_WARNING", "30"))
 MAX_DAYS_INACTIVE_REMOVAL  = int(os.getenv("MAX_DAYS_INACTIVE_REMOVAL", "60"))
 
+# Gestión de nuevos usuarios inactivos (0 = feature deshabilitada)
+NEW_USER_GRACE_PERIOD_DAYS   = int(os.getenv("NEW_USER_GRACE_PERIOD_DAYS", "7"))
+NEW_USER_WARNING_DAYS_BEFORE = int(os.getenv("NEW_USER_WARNING_DAYS_BEFORE", "3"))
+
 DB_PATH        = "estadisticas_grupo.db"
 BOT_STATE_PATH = "bot_state.json"
 HORA_REPORTE   = time(hour=10, minute=0, second=0, tzinfo=timezone.utc)
@@ -588,6 +592,50 @@ def obtener_usuarios_sin_mensajes() -> list[tuple[int, str, str | None, int, str
 _pendientes_noparticipa: list[tuple[int, str, str | None, int, str | None]] = []
 
 
+# ---------------------------------------------------------------------------
+# Nuevos usuarios inactivos
+# ---------------------------------------------------------------------------
+
+def obtener_nuevos_usuarios_a_avisar() -> list[tuple[int, str, str | None, int, str | None]]:
+    """Nuevos usuarios (total_mensajes=0) que vencen en exactamente NEW_USER_WARNING_DAYS_BEFORE días."""
+    if NEW_USER_GRACE_PERIOD_DAYS == 0:
+        return []
+    dias_aviso = NEW_USER_GRACE_PERIOD_DAYS - NEW_USER_WARNING_DAYS_BEFORE
+    if dias_aviso <= 0:
+        return []
+    limite_sup = (datetime.now(timezone.utc) - timedelta(days=dias_aviso)).isoformat()
+    limite_inf = (datetime.now(timezone.utc) - timedelta(days=dias_aviso + 1)).isoformat()
+    cur = _conn.execute("""
+        SELECT user_id, nombre, username, total_mensajes, fecha_registro
+        FROM   usuarios
+        WHERE  total_mensajes = 0
+          AND  fecha_registro IS NOT NULL
+          AND  fecha_registro <= ?
+          AND  fecha_registro >  ?
+        ORDER BY fecha_registro ASC
+    """, (limite_sup, limite_inf))
+    return cur.fetchall()
+
+
+def obtener_nuevos_usuarios_a_expulsar() -> list[tuple[int, str, str | None, int, str | None]]:
+    """Nuevos usuarios (total_mensajes=0) con plazo vencido (>= NEW_USER_GRACE_PERIOD_DAYS días)."""
+    if NEW_USER_GRACE_PERIOD_DAYS == 0:
+        return []
+    limite = (datetime.now(timezone.utc) - timedelta(days=NEW_USER_GRACE_PERIOD_DAYS)).isoformat()
+    cur = _conn.execute("""
+        SELECT user_id, nombre, username, total_mensajes, fecha_registro
+        FROM   usuarios
+        WHERE  total_mensajes = 0
+          AND  fecha_registro IS NOT NULL
+          AND  fecha_registro <= ?
+        ORDER BY fecha_registro ASC
+    """, (limite,))
+    return cur.fetchall()
+
+
+_pendientes_nuevos: list[tuple[int, str, str | None, int, str | None]] = []
+
+
 async def handler_noparticipa(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     global _pendientes_noparticipa
     _pendientes_noparticipa = obtener_usuarios_sin_mensajes()
@@ -608,6 +656,54 @@ async def handler_noparticipa(update: Update, context: ContextTypes.DEFAULT_TYPE
         logger.info(f"[noparticipa] {nombre} ({alias}) — desde {desde}")
 
     await _send_long_message(context.bot, ADMIN_ID, "\n".join(lineas), "HTML")
+
+
+async def check_nuevos_proximos_a_vencer(bot) -> None:
+    """Avisa al admin si hay nuevos usuarios que vencen en exactamente NEW_USER_WARNING_DAYS_BEFORE días."""
+    usuarios = obtener_nuevos_usuarios_a_avisar()
+    if not usuarios:
+        return
+    dias_restantes = NEW_USER_WARNING_DAYS_BEFORE
+    lineas = [f"⚠️ <b>Nuevos sin participar — vencen en {dias_restantes} día(s)</b>\n"]
+    for user_id, nombre, username, _, fecha_reg in usuarios:
+        alias = f"@{username}" if username else f"id:{user_id}"
+        if fecha_reg:
+            dt_reg = datetime.fromisoformat(fecha_reg)
+            fecha_venc = (dt_reg + timedelta(days=NEW_USER_GRACE_PERIOD_DAYS)).strftime('%d/%m/%Y')
+            lineas.append(
+                f"• <b>{_escape_html(nombre)}</b> ({alias}) "
+                f"— entró el {dt_reg.strftime('%d/%m/%Y')} — vence el {fecha_venc}"
+            )
+        else:
+            lineas.append(f"• <b>{_escape_html(nombre)}</b> ({alias})")
+    await _send_long_message(bot, ADMIN_ID, "\n".join(lineas), "HTML")
+    logger.info(f"[nuevos] Aviso previo: {len(usuarios)} usuario(s) vencen en {dias_restantes} día(s).")
+
+
+async def avisar_nuevos_vencidos(bot) -> None:
+    """Avisa al admin si hay nuevos usuarios con plazo vencido. Requiere /expulsarnuevos para expulsar."""
+    usuarios = obtener_nuevos_usuarios_a_expulsar()
+    if not usuarios:
+        return
+    ahora = datetime.now(timezone.utc)
+    lineas = [
+        f"🚨 <b>Nuevos usuarios sin participar — plazo vencido ({len(usuarios)})</b>\n",
+        f"Llevan más de {NEW_USER_GRACE_PERIOD_DAYS} días en el grupo sin enviar ningún mensaje.\n",
+        "Usa /expulsarnuevos para expulsarlos.\n",
+    ]
+    for user_id, nombre, username, _, fecha_reg in usuarios:
+        alias = f"@{username}" if username else f"id:{user_id}"
+        if fecha_reg:
+            dt_reg = datetime.fromisoformat(fecha_reg)
+            dias = (ahora - dt_reg).days
+            lineas.append(
+                f"• <b>{_escape_html(nombre)}</b> ({alias}) "
+                f"— entró el {dt_reg.strftime('%d/%m/%Y')} — {dias} días sin mensaje"
+            )
+        else:
+            lineas.append(f"• <b>{_escape_html(nombre)}</b> ({alias})")
+    await _send_long_message(bot, ADMIN_ID, "\n".join(lineas), "HTML")
+    logger.info(f"[nuevos] Aviso vencidos: {len(usuarios)} usuario(s).")
 
 
 async def handler_expulsarnoparticipa(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -639,6 +735,96 @@ async def handler_expulsarnoparticipa(update: Update, context: ContextTypes.DEFA
         lineas += [f"\n⚠️ <b>{len(errores)} error(es):</b>\n"] + errores
 
     await _send_long_message(context.bot, ADMIN_ID, "\n".join(lineas), "HTML")
+
+
+# ---------------------------------------------------------------------------
+# /expulsarnuevos — expulsar nuevos usuarios con plazo vencido
+# ---------------------------------------------------------------------------
+
+async def handler_expulsarnuevos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Lista los nuevos usuarios con plazo vencido y pide confirmación para expulsarlos."""
+    global _pendientes_nuevos
+
+    if NEW_USER_GRACE_PERIOD_DAYS == 0:
+        await update.message.reply_text(
+            "La gestión de nuevos usuarios inactivos está deshabilitada "
+            "(NEW_USER_GRACE_PERIOD_DAYS=0)."
+        )
+        return
+
+    _pendientes_nuevos = obtener_nuevos_usuarios_a_expulsar()
+
+    if not _pendientes_nuevos:
+        await update.message.reply_text("No hay nuevos usuarios con el plazo vencido.")
+        return
+
+    ahora = datetime.now(timezone.utc)
+    lineas = [
+        f"🚨 <b>Nuevos usuarios con plazo vencido ({len(_pendientes_nuevos)})</b>\n",
+        f"Sin ningún mensaje tras {NEW_USER_GRACE_PERIOD_DAYS} días en el grupo.\n",
+    ]
+    for user_id, nombre, username, _, fecha_reg in _pendientes_nuevos:
+        alias = f"@{username}" if username else f"id:{user_id}"
+        if fecha_reg:
+            dt_reg = datetime.fromisoformat(fecha_reg)
+            dias = (ahora - dt_reg).days
+            lineas.append(
+                f"• <b>{_escape_html(nombre)}</b> ({alias}) "
+                f"— entró el {dt_reg.strftime('%d/%m/%Y')} — {dias} días sin mensaje"
+            )
+        else:
+            lineas.append(f"• <b>{_escape_html(nombre)}</b> ({alias})")
+
+    keyboard = [[
+        InlineKeyboardButton("✅ Confirmar", callback_data="nuevos_confirm"),
+        InlineKeyboardButton("❌ Cancelar",  callback_data="nuevos_cancel"),
+    ]]
+    await _send_long_message(context.bot, ADMIN_ID, "\n".join(lineas), "HTML")
+    await update.message.reply_text(
+        "¿Confirmas la expulsión?",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    logger.info(f"[nuevos] Confirmación solicitada: {len(_pendientes_nuevos)} usuario(s).")
+
+
+async def handler_callback_nuevos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Maneja la confirmación/cancelación de /expulsarnuevos."""
+    global _pendientes_nuevos
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "nuevos_cancel":
+        _pendientes_nuevos = []
+        await query.edit_message_text("❌ Operación cancelada.")
+        return
+
+    if query.data == "nuevos_confirm":
+        if not _pendientes_nuevos:
+            await query.edit_message_text("No hay usuarios pendientes de expulsión.")
+            return
+
+        expulsados = []
+        errores    = []
+
+        for user_id, nombre, username, _, _ in _pendientes_nuevos:
+            alias = f"@{username}" if username else f"id:{user_id}"
+            try:
+                await context.bot.ban_chat_member(chat_id=GRUPO_ID, user_id=user_id)
+                await context.bot.unban_chat_member(chat_id=GRUPO_ID, user_id=user_id)
+                eliminar_miembro(user_id)
+                expulsados.append(f"• {_escape_html(nombre)} ({alias})")
+                logger.info(f"[nuevos] Expulsado: {nombre} ({alias})")
+            except Exception as exc:
+                errores.append(f"• {_escape_html(nombre)} ({alias}): {_escape_html(str(exc))}")
+                logger.warning(f"[nuevos] Error al expulsar {nombre} ({alias}): {exc}")
+
+        _pendientes_nuevos = []
+
+        resultado = [f"✅ <b>{len(expulsados)} usuario(s) expulsados:</b>\n"] + expulsados
+        if errores:
+            resultado += [f"\n⚠️ <b>{len(errores)} error(es):</b>\n"] + errores
+
+        await query.edit_message_text("\n".join(resultado), parse_mode="HTML")
 
 
 # ---------------------------------------------------------------------------
@@ -781,6 +967,9 @@ async def handler_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     await enviar_aviso_inactivos(context.bot)
     await enviar_reporte_expulsion(context.bot)
+    if NEW_USER_GRACE_PERIOD_DAYS > 0:
+        await check_nuevos_proximos_a_vencer(context.bot)
+        await avisar_nuevos_vencidos(context.bot)
 
 
 # Usuarios pendientes de expulsión vía /kick DOWN
@@ -1002,6 +1191,9 @@ async def post_init(application: Application) -> None:
 
     await enviar_aviso_inactivos(application.bot)
     await enviar_reporte_expulsion(application.bot)
+    if NEW_USER_GRACE_PERIOD_DAYS > 0:
+        await check_nuevos_proximos_a_vencer(application.bot)
+        await avisar_nuevos_vencidos(application.bot)
 
 
 # ---------------------------------------------------------------------------
@@ -1024,6 +1216,12 @@ async def enviar_resumen_diario(context: ContextTypes.DEFAULT_TYPE) -> None:
         parse_mode="HTML",
     )
     logger.info("Resumen diario enviado al admin.")
+
+    await enviar_aviso_inactivos(context.bot)
+    await enviar_reporte_expulsion(context.bot)
+    if NEW_USER_GRACE_PERIOD_DAYS > 0:
+        await check_nuevos_proximos_a_vencer(context.bot)
+        await avisar_nuevos_vencidos(context.bot)
 
 
 # ---------------------------------------------------------------------------
@@ -1058,8 +1256,10 @@ def main() -> None:
     app.add_handler(CommandHandler("recalcularfechas",     handler_recalcularfechas,     filters=_admin_privado))
     app.add_handler(CommandHandler("report",               handler_report,               filters=_admin_privado))
     app.add_handler(CommandHandler("kick",                 handler_kick,                 filters=_admin_privado))
+    app.add_handler(CommandHandler("expulsarnuevos",       handler_expulsarnuevos,       filters=_admin_privado))
 
-    app.add_handler(CallbackQueryHandler(handler_callback_kick, pattern="^kick_"))
+    app.add_handler(CallbackQueryHandler(handler_callback_kick,   pattern="^kick_"))
+    app.add_handler(CallbackQueryHandler(handler_callback_nuevos, pattern="^nuevos_"))
 
     job_queue = app.job_queue
     job_queue.run_daily(
