@@ -618,18 +618,21 @@ def obtener_nuevos_usuarios_a_avisar() -> list[tuple[int, str, str | None, int, 
 
 
 def obtener_nuevos_usuarios_a_expulsar() -> list[tuple[int, str, str | None, int, str | None]]:
-    """Nuevos usuarios (total_mensajes=0) con plazo vencido (>= NEW_USER_GRACE_PERIOD_DAYS días)."""
+    """Nuevos usuarios (total_mensajes=0) con plazo vencido, registrados hace entre N y N+1 días.
+    Usuarios anteriores a N+1 días son gestionados por /noparticipa."""
     if NEW_USER_GRACE_PERIOD_DAYS == 0:
         return []
-    limite = (datetime.now(timezone.utc) - timedelta(days=NEW_USER_GRACE_PERIOD_DAYS)).isoformat()
+    limite_vencido = (datetime.now(timezone.utc) - timedelta(days=NEW_USER_GRACE_PERIOD_DAYS)).isoformat()
+    limite_nuevo   = (datetime.now(timezone.utc) - timedelta(days=NEW_USER_GRACE_PERIOD_DAYS + 1)).isoformat()
     cur = _conn.execute("""
         SELECT user_id, nombre, username, total_mensajes, fecha_registro
         FROM   usuarios
         WHERE  total_mensajes = 0
           AND  fecha_registro IS NOT NULL
           AND  fecha_registro <= ?
+          AND  fecha_registro >  ?
         ORDER BY fecha_registro ASC
-    """, (limite,))
+    """, (limite_vencido, limite_nuevo))
     return cur.fetchall()
 
 
