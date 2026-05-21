@@ -639,6 +639,23 @@ def obtener_nuevos_usuarios_a_expulsar() -> list[tuple[int, str, str | None, int
 _pendientes_nuevos: list[tuple[int, str, str | None, int, str | None]] = []
 
 
+def obtener_todos_nuevos_sin_mensajes() -> list[tuple[int, str, str | None, int, str | None]]:
+    """Todos los nuevos usuarios (total_mensajes=0) registrados en los últimos N+1 días.
+    Incluye tanto los que aún están en período de gracia como los ya vencidos."""
+    if NEW_USER_GRACE_PERIOD_DAYS == 0:
+        return []
+    limite = (datetime.now(timezone.utc) - timedelta(days=NEW_USER_GRACE_PERIOD_DAYS + 1)).isoformat()
+    cur = _conn.execute("""
+        SELECT user_id, nombre, username, total_mensajes, fecha_registro
+        FROM   usuarios
+        WHERE  total_mensajes = 0
+          AND  fecha_registro IS NOT NULL
+          AND  fecha_registro > ?
+        ORDER BY fecha_registro ASC
+    """, (limite,))
+    return cur.fetchall()
+
+
 async def handler_noparticipa(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     global _pendientes_noparticipa
     _pendientes_noparticipa = obtener_usuarios_sin_mensajes()
@@ -828,6 +845,98 @@ async def handler_callback_nuevos(update: Update, context: ContextTypes.DEFAULT_
             resultado += [f"\n⚠️ <b>{len(errores)} error(es):</b>\n"] + errores
 
         await query.edit_message_text("\n".join(resultado), parse_mode="HTML")
+
+
+# ---------------------------------------------------------------------------
+# /nuevos — informe de nuevos usuarios sin participar
+# ---------------------------------------------------------------------------
+
+async def handler_nuevos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Muestra todos los nuevos usuarios sin mensajes: en período de gracia y vencidos."""
+    if NEW_USER_GRACE_PERIOD_DAYS == 0:
+        await update.message.reply_text(
+            "La gestión de nuevos usuarios está deshabilitada (NEW_USER_GRACE_PERIOD_DAYS=0)."
+        )
+        return
+
+    usuarios = obtener_todos_nuevos_sin_mensajes()
+    ahora = datetime.now(timezone.utc)
+
+    en_periodo: list[str] = []
+    vencidos:   list[str] = []
+
+    for user_id, nombre, username, _, fecha_reg in usuarios:
+        alias = f"@{username}" if username else f"id:{user_id}"
+        dt_reg = datetime.fromisoformat(fecha_reg)
+        dias_transcurridos = (ahora - dt_reg).days
+        dias_restantes = NEW_USER_GRACE_PERIOD_DAYS - dias_transcurridos
+        fecha_str = dt_reg.strftime('%d/%m/%Y')
+        if dias_restantes > 0:
+            en_periodo.append(
+                f"• <b>{_escape_html(nombre)}</b> ({alias}) "
+                f"— entró el {fecha_str} — quedan {dias_restantes} día(s)"
+            )
+        else:
+            dias_pasados = abs(dias_restantes)
+            vencidos.append(
+                f"• <b>{_escape_html(nombre)}</b> ({alias}) "
+                f"— entró el {fecha_str} — vencido hace {dias_pasados} día(s)"
+            )
+
+    if not en_periodo and not vencidos:
+        await update.message.reply_text(
+            f"No hay nuevos usuarios sin participar en los últimos {NEW_USER_GRACE_PERIOD_DAYS + 1} días."
+        )
+        return
+
+    lineas = [f"📋 <b>Nuevos usuarios sin participar</b> (período: {NEW_USER_GRACE_PERIOD_DAYS} días)\n"]
+
+    if en_periodo:
+        lineas.append(f"⏳ <b>En período de gracia ({len(en_periodo)})</b>\n")
+        lineas.extend(en_periodo)
+
+    if vencidos:
+        if en_periodo:
+            lineas.append("")
+        lineas.append(f"🚨 <b>Plazo vencido ({len(vencidos)}) — usa /expulsarnuevos</b>\n")
+        lineas.extend(vencidos)
+
+    await _send_long_message(context.bot, ADMIN_ID, "\n".join(lineas), "HTML")
+    logger.info(f"[nuevos] Informe: {len(en_periodo)} en período, {len(vencidos)} vencidos.")
+
+
+# ---------------------------------------------------------------------------
+# /help — referencia de comandos disponibles
+# ---------------------------------------------------------------------------
+
+async def handler_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Envía al admin la referencia completa de comandos disponibles."""
+    texto = (
+        "📖 <b>Comandos disponibles</b>\n"
+        "\n"
+        "📊 <b>Estadísticas</b>\n"
+        "/report — Reporte completo TOP5 + DOWN5 + avisos de inactividad\n"
+        "/report TOP — Solo TOP 5 más activos\n"
+        "/report DOWN — Solo DOWN 5 menos activos\n"
+        "\n"
+        "🔇 <b>Inactividad general</b>\n"
+        "/noparticipa — Lista usuarios sin mensajes desde hace más de "
+        f"{MAX_DAYS_INACTIVE_WARNING} días\n"
+        "/expulsarnoparticipa — Expulsa los listados por /noparticipa\n"
+        "/ok — Confirma las expulsiones pendientes del reporte diario\n"
+        "/moratoria — Resetea el contador de inactividad para todos los inactivos\n"
+        "\n"
+        "👥 <b>Nuevos usuarios</b>\n"
+        f"/nuevos — Informe de nuevos miembros sin participar (período: {NEW_USER_GRACE_PERIOD_DAYS} días)\n"
+        "/expulsarnuevos — Expulsa nuevos con plazo vencido (con confirmación)\n"
+        "\n"
+        "🔧 <b>Herramientas</b>\n"
+        "/kick DOWN — Expulsión interactiva de los 5 usuarios menos activos\n"
+        "/recalcularfechas [YYYY-MM-DD] — Re-escanea el historial para corregir fechas\n"
+        "\n"
+        "/help — Muestra este mensaje"
+    )
+    await update.message.reply_html(texto)
 
 
 # ---------------------------------------------------------------------------
@@ -1259,7 +1368,9 @@ def main() -> None:
     app.add_handler(CommandHandler("recalcularfechas",     handler_recalcularfechas,     filters=_admin_privado))
     app.add_handler(CommandHandler("report",               handler_report,               filters=_admin_privado))
     app.add_handler(CommandHandler("kick",                 handler_kick,                 filters=_admin_privado))
+    app.add_handler(CommandHandler("nuevos",               handler_nuevos,               filters=_admin_privado))
     app.add_handler(CommandHandler("expulsarnuevos",       handler_expulsarnuevos,       filters=_admin_privado))
+    app.add_handler(CommandHandler("help",                 handler_help,                 filters=_admin_privado))
 
     app.add_handler(CallbackQueryHandler(handler_callback_kick,   pattern="^kick_"))
     app.add_handler(CallbackQueryHandler(handler_callback_nuevos, pattern="^nuevos_"))
