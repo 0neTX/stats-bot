@@ -32,6 +32,7 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
 )
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     ChatMemberHandler,
@@ -426,11 +427,58 @@ def _loguear_reporte(top5, down5) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Aviso de inactividad
+# Utilidades de expulsión
 # ---------------------------------------------------------------------------
 
 def _escape_html(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+async def _ejecutar_expulsion(bot, user_id: int, nombre: str,
+                               username: str | None, tag: str) -> tuple[str, str]:
+    """Ban + unban de un usuario con manejo diferenciado de errores.
+
+    Devuelve (estado, texto) donde estado es:
+      "expulsado" — ban+unban exitosos, eliminado de BD
+      "ausente"   — Participant_id_invalid: ya no estaba en el grupo, eliminado de BD
+      "error"     — otro error, NO eliminado de BD
+    """
+    alias = f"@{username}" if username else f"id:{user_id}"
+    try:
+        await bot.ban_chat_member(chat_id=GRUPO_ID, user_id=user_id)
+        await bot.unban_chat_member(chat_id=GRUPO_ID, user_id=user_id)
+        eliminar_miembro(user_id)
+        logger.info(f"[{tag}] Expulsado: {nombre} ({alias})")
+        return "expulsado", f"• {_escape_html(nombre)} ({alias})"
+    except BadRequest as exc:
+        if "participant_id_invalid" in str(exc).lower():
+            eliminar_miembro(user_id)
+            logger.info(f"[{tag}] Ya no estaba en el grupo, eliminado de BD: {nombre} ({alias})")
+            return "ausente", f"• {_escape_html(nombre)} ({alias})"
+        logger.warning(f"[{tag}] Error al expulsar {nombre} ({alias}): {exc}")
+        return "error", f"• {_escape_html(nombre)} ({alias}): {_escape_html(str(exc))}"
+    except Exception as exc:
+        logger.warning(f"[{tag}] Error al expulsar {nombre} ({alias}): {exc}")
+        return "error", f"• {_escape_html(nombre)} ({alias}): {_escape_html(str(exc))}"
+
+
+def _construir_resultado_expulsion(expulsados: list[str],
+                                    ausentes: list[str],
+                                    errores: list[str]) -> str:
+    """Construye el mensaje de resultado de una operación de expulsión masiva."""
+    lineas = [f"✅ <b>{len(expulsados)} usuario(s) expulsados:</b>"] + expulsados
+    if ausentes:
+        lineas += [
+            f"\n👻 <b>{len(ausentes)} ya no estaban en el grupo (eliminados de BD):</b>"
+        ] + ausentes
+    if errores:
+        lineas += [f"\n⚠️ <b>{len(errores)} error(es):</b>"] + errores
+    return "\n".join(lineas)
+
+
+# ---------------------------------------------------------------------------
+# Aviso de inactividad
+# ---------------------------------------------------------------------------
 
 
 _TELEGRAM_MAX_LEN = 4096
@@ -547,29 +595,28 @@ async def handler_ok(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text("No hay usuarios pendientes de expulsión.")
         return
 
-    expulsados = []
-    errores    = []
+    expulsados: list[str] = []
+    ausentes:   list[str] = []
+    errores:    list[str] = []
 
     for user_id, nombre, username, total, _, _ in _pendientes_expulsion:
-        alias = f"@{username}" if username else f"id:{user_id}"
-        try:
-            # Ban + unban inmediato: expulsa pero permite volver en el futuro
-            await context.bot.ban_chat_member(chat_id=GRUPO_ID, user_id=user_id)
-            await context.bot.unban_chat_member(chat_id=GRUPO_ID, user_id=user_id)
-            eliminar_miembro(user_id)
-            expulsados.append(f"• {_escape_html(nombre)} ({alias})")
-            logger.info(f"[expulsión] Expulsado: {nombre} ({alias})")
-        except Exception as exc:
-            errores.append(f"• {_escape_html(nombre)} ({alias}): {_escape_html(str(exc))}")
-            logger.warning(f"[expulsión] Error al expulsar {nombre} ({alias}): {exc}")
+        estado, texto = await _ejecutar_expulsion(
+            context.bot, user_id, nombre, username, "expulsión"
+        )
+        if estado == "expulsado":
+            expulsados.append(texto)
+        elif estado == "ausente":
+            ausentes.append(texto)
+        else:
+            errores.append(texto)
 
     _pendientes_expulsion.clear()
 
-    lineas = [f"✅ <b>{len(expulsados)} usuario(s) expulsados:</b>\n"] + expulsados
-    if errores:
-        lineas += [f"\n⚠️ <b>{len(errores)} error(es):</b>\n"] + errores
-
-    await _send_long_message(context.bot, ADMIN_ID, "\n".join(lineas), "HTML")
+    await _send_long_message(
+        context.bot, ADMIN_ID,
+        _construir_resultado_expulsion(expulsados, ausentes, errores),
+        "HTML",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -716,28 +763,28 @@ async def handler_expulsarnoparticipa(update: Update, context: ContextTypes.DEFA
         await update.message.reply_text("No hay usuarios pendientes. Ejecuta /noparticipa primero.")
         return
 
-    expulsados = []
-    errores    = []
+    expulsados: list[str] = []
+    ausentes:   list[str] = []
+    errores:    list[str] = []
 
     for user_id, nombre, username, _, _ in _pendientes_noparticipa:
-        alias = f"@{username}" if username else f"id:{user_id}"
-        try:
-            await context.bot.ban_chat_member(chat_id=GRUPO_ID, user_id=user_id)
-            await context.bot.unban_chat_member(chat_id=GRUPO_ID, user_id=user_id)
-            eliminar_miembro(user_id)
-            expulsados.append(f"• {_escape_html(nombre)} ({alias})")
-            logger.info(f"[noparticipa] Expulsado: {nombre} ({alias})")
-        except Exception as exc:
-            errores.append(f"• {_escape_html(nombre)} ({alias}): {_escape_html(str(exc))}")
-            logger.warning(f"[noparticipa] Error al expulsar {nombre} ({alias}): {exc}")
+        estado, texto = await _ejecutar_expulsion(
+            context.bot, user_id, nombre, username, "noparticipa"
+        )
+        if estado == "expulsado":
+            expulsados.append(texto)
+        elif estado == "ausente":
+            ausentes.append(texto)
+        else:
+            errores.append(texto)
 
     _pendientes_noparticipa.clear()
 
-    lineas = [f"✅ <b>{len(expulsados)} usuario(s) expulsados:</b>\n"] + expulsados
-    if errores:
-        lineas += [f"\n⚠️ <b>{len(errores)} error(es):</b>\n"] + errores
-
-    await _send_long_message(context.bot, ADMIN_ID, "\n".join(lineas), "HTML")
+    await _send_long_message(
+        context.bot, ADMIN_ID,
+        _construir_resultado_expulsion(expulsados, ausentes, errores),
+        "HTML",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -806,28 +853,27 @@ async def handler_callback_nuevos(update: Update, context: ContextTypes.DEFAULT_
             await query.edit_message_text("No hay usuarios pendientes de expulsión.")
             return
 
-        expulsados = []
-        errores    = []
+        expulsados: list[str] = []
+        ausentes:   list[str] = []
+        errores:    list[str] = []
 
         for user_id, nombre, username, _, _ in _pendientes_nuevos:
-            alias = f"@{username}" if username else f"id:{user_id}"
-            try:
-                await context.bot.ban_chat_member(chat_id=GRUPO_ID, user_id=user_id)
-                await context.bot.unban_chat_member(chat_id=GRUPO_ID, user_id=user_id)
-                eliminar_miembro(user_id)
-                expulsados.append(f"• {_escape_html(nombre)} ({alias})")
-                logger.info(f"[nuevos] Expulsado: {nombre} ({alias})")
-            except Exception as exc:
-                errores.append(f"• {_escape_html(nombre)} ({alias}): {_escape_html(str(exc))}")
-                logger.warning(f"[nuevos] Error al expulsar {nombre} ({alias}): {exc}")
+            estado, texto = await _ejecutar_expulsion(
+                context.bot, user_id, nombre, username, "nuevos"
+            )
+            if estado == "expulsado":
+                expulsados.append(texto)
+            elif estado == "ausente":
+                ausentes.append(texto)
+            else:
+                errores.append(texto)
 
         _pendientes_nuevos = []
 
-        resultado = [f"✅ <b>{len(expulsados)} usuario(s) expulsados:</b>\n"] + expulsados
-        if errores:
-            resultado += [f"\n⚠️ <b>{len(errores)} error(es):</b>\n"] + errores
-
-        await query.edit_message_text("\n".join(resultado), parse_mode="HTML")
+        await query.edit_message_text(
+            _construir_resultado_expulsion(expulsados, ausentes, errores),
+            parse_mode="HTML",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1029,27 +1075,27 @@ async def handler_callback_kick(update: Update, context: ContextTypes.DEFAULT_TY
             await query.edit_message_text("No hay usuarios pendientes de expulsión.")
             return
 
-        expulsados = []
-        errores    = []
+        expulsados: list[str] = []
+        ausentes:   list[str] = []
+        errores:    list[str] = []
 
         for user_id, nombre, username, _, _, _ in _pendientes_kick:
-            alias = f"@{username}" if username else f"id:{user_id}"
-            try:
-                # Ban + unban inmediato para permitir reentrada futura
-                await context.bot.ban_chat_member(chat_id=GRUPO_ID, user_id=user_id)
-                await context.bot.unban_chat_member(chat_id=GRUPO_ID, user_id=user_id)
-                eliminar_miembro(user_id)
-                expulsados.append(f"• {_escape_html(nombre)} ({alias})")
-            except Exception as exc:
-                errores.append(f"• {_escape_html(nombre)} ({alias}): {str(exc)}")
+            estado, texto = await _ejecutar_expulsion(
+                context.bot, user_id, nombre, username, "kick"
+            )
+            if estado == "expulsado":
+                expulsados.append(texto)
+            elif estado == "ausente":
+                ausentes.append(texto)
+            else:
+                errores.append(texto)
 
         _pendientes_kick = []
 
-        resultado = [f"✅ <b>{len(expulsados)} usuario(s) expulsados:</b>\n"] + expulsados
-        if errores:
-            resultado += [f"\n⚠️ <b>{len(errores)} error(es):</b>\n"] + errores
-
-        await query.edit_message_text("\n".join(resultado), parse_mode="HTML")
+        await query.edit_message_text(
+            _construir_resultado_expulsion(expulsados, ausentes, errores),
+            parse_mode="HTML",
+        )
 
 
 # ---------------------------------------------------------------------------
