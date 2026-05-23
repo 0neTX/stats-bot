@@ -1,0 +1,40 @@
+  Aquí tienes varias propuestas de mejora divididas por categorías, enfocadas en mejorar la moderación, la analítica y
+  la experiencia del administrador:
+
+  1. Funcionalidades de Moderación y Gestión
+   * Lista Blanca (Exenciones): Implementar una tabla o comando para eximir a ciertos usuarios (bots, administradores o
+     "invitados especiales") de los procesos de expulsión por inactividad.
+   * Avisos Proactivos a Usuarios: Actualmente, el bot avisa al administrador. Una mejora sería que el bot mencione a
+     los usuarios en el grupo (o les escriba por privado si han iniciado el bot) avisándoles de que su plazo de
+     inactividad está cerca de vencer (ej. "¡Hola @usuario! Te echamos de menos, pásate a saludar antes del DD/MM para
+     seguir en el grupo").
+   * Comando de "Ficha de Usuario": Un comando /info @usuario para que el administrador vea rápidamente el historial de
+     ese usuario (fecha de entrada, total de mensajes, última vez que habló, etc.).
+
+  2. Visualización y Analítica Avanzada
+   * Gráficos de Actividad: Utilizar una librería como matplotlib para generar y enviar una imagen con la evolución de
+     mensajes (ej. mensajes por día en la última semana o mes) junto al reporte diario.
+   * Mapas de Calor (Heatmaps): Visualizar en qué franjas horarias y qué días de la semana hay más actividad en el
+     grupo. Esto ayuda a los administradores a saber cuándo es mejor publicar anuncios importantes.
+   * Estadísticas de Contenido: Ranking de los stickers más usados, emojis más frecuentes o qué tipo de archivos (fotos,
+     vídeos, audios) se comparten más.
+
+  3. Interfaz de Administrador (UX)
+   * Panel Interactivo con Botones: En el reporte de DOWN 5 o de inactivos, añadir botones inline debajo de cada
+     usuario: [Perdonar (7 días)], [Eximir], [Expulsar ya]. Esto evita tener que escribir comandos como /ok.
+   * Gestión de "Vacaciones": Un comando para que un usuario (o el admin) pueda marcar un estado de "Vacaciones" hasta
+     una fecha determinada, pausando temporalmente su contador de inactividad.
+
+  4. Robustez y Mantenimiento
+   * Backups Automáticos: Programar el envío diario del archivo estadisticas_grupo.db comprimido al administrador o a un
+     canal privado de logs, para prevenir pérdida de datos.
+   * Healthcheck en Docker: Añadir un pequeño servidor web interno (con aiohttp o fastapi) o un script de comprobación
+     para que Docker pueda monitorizar si el proceso del bot está realmente "vivo" y respondiendo.
+   * Sistema de Logs Mejorado: Implementar un canal de Telegram privado para "Logs" donde el bot notifique cada
+     expulsión, cada error crítico o cada entrada de nuevo miembro de forma detallada.
+
+  5. Engagement (Para los miembros)
+   * Comandos Públicos Limitados: Permitir que los usuarios usen /mystats por privado para ver su propio ranking y total
+     de mensajes sin saturar el grupo.
+   * Logros y Rangos: Asignar "rangos" automáticos basados en la actividad (ej. "Novato", "Habitual", "Leyenda del
+     grupo") para incentivar la participación.
