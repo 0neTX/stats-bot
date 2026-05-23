@@ -78,7 +78,8 @@ NEW_USER_WARNING_DAYS_BEFORE = int(os.getenv("NEW_USER_WARNING_DAYS_BEFORE", "3"
 
 DB_PATH        = "estadisticas_grupo.db"
 BOT_STATE_PATH = "bot_state.json"
-HORA_REPORTE   = time(hour=10, minute=0, second=0, tzinfo=timezone.utc)
+MADRID_TZ      = ZoneInfo("Europe/Madrid")
+HORA_REPORTE   = time(hour=7, minute=0, second=0, tzinfo=MADRID_TZ)
 
 # Timestamp del último mensaje procesado; se persiste en bot_state.json al parar
 _ultimo_registro: datetime | None = None
