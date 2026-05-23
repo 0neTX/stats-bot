@@ -153,7 +153,7 @@ def leer_ultimo_registro() -> datetime | None:
 
 
 def registrar_miembro(user_id: int, nombre: str, username: str | None) -> None:
-    """Inserta el miembro con 0 mensajes si no existe aún en la BD."""
+    """Inserta the miembro con 0 mensajes si no existe aún en la BD."""
     ahora = datetime.now(timezone.utc).isoformat()
     _conn.execute("""
         INSERT OR IGNORE INTO usuarios
