@@ -265,6 +265,37 @@ def obtener_usuarios_para_expulsar() -> list[tuple[int, str, str | None, int, st
     return cur.fetchall()
 
 
+def buscar_usuarios(termino: str) -> list[tuple[int, str, str | None, int, str | None, str | None]]:
+    """Busca usuarios en la BD por ID, username o nombre."""
+    # Si es numérico, buscar por ID
+    if termino.isdigit():
+        cur = _conn.execute("""
+            SELECT user_id, nombre, username, total_mensajes, ultimo_mensaje, fecha_registro
+            FROM   usuarios
+            WHERE  user_id = ?
+        """, (int(termino),))
+        return cur.fetchall()
+
+    # Si empieza por @, buscar por username
+    if termino.startswith("@"):
+        username = termino[1:]
+        cur = _conn.execute("""
+            SELECT user_id, nombre, username, total_mensajes, ultimo_mensaje, fecha_registro
+            FROM   usuarios
+            WHERE  username LIKE ?
+        """, (username,))
+        return cur.fetchall()
+
+    # Por defecto, buscar por nombre (fuzzy)
+    cur = _conn.execute("""
+        SELECT user_id, nombre, username, total_mensajes, ultimo_mensaje, fecha_registro
+        FROM   usuarios
+        WHERE  nombre LIKE ?
+        LIMIT 10
+    """, (f"%{termino}%",))
+    return cur.fetchall()
+
+
 # Usuarios pendientes de expulsión, poblado por enviar_reporte_expulsion()
 _pendientes_expulsion: list[tuple[int, str, str | None, int, str]] = []
 
@@ -746,6 +777,38 @@ async def check_nuevos_proximos_a_vencer(bot) -> None:
     await _send_long_message(bot, ADMIN_ID, "\n".join(lineas), "HTML")
     logger.info(f"[nuevos] Aviso previo: {len(usuarios)} usuario(s) vencen en {dias_restantes} día(s).")
 
+    # Notificar también al grupo de forma amigable
+    await enviar_aviso_grupo_inactivos(bot, usuarios)
+
+
+async def enviar_aviso_grupo_inactivos(bot, usuarios) -> None:
+    """Envía un mensaje amigable al grupo sobre nuevos usuarios que no han participado."""
+    if not usuarios:
+        return
+
+    ahora = datetime.now(timezone.utc)
+    lineas = [
+        "¡Hola a todos! 👋 Todos somos bienvenidos en este grupo, pero recordad que este es un espacio para "
+        "intercambiar contenido, charlas e ideas y, sobre todo, para participar.\n",
+        "Aprovechamos para saludar a los nuevos miembros que aún no se han animado a escribir:\n"
+    ]
+
+    for user_id, nombre, _, _, fecha_reg in usuarios:
+        if fecha_reg:
+            dt_reg = datetime.fromisoformat(fecha_reg)
+            dias = (ahora - dt_reg).days
+            lineas.append(f"• <b>{_escape_html(nombre)}</b> (ID: {user_id}) — {dias} días con nosotros")
+        else:
+            lineas.append(f"• <b>{_escape_html(nombre)}</b> (ID: {user_id})")
+
+    lineas.append(
+        "\nSi no saludáis o no queréis participar al uniros, recordad que seréis expulsados en el plazo "
+        "establecido para mantener el grupo activo y dinámico. ¡Animaos a participar! 😊"
+    )
+
+    await _send_long_message(bot, GRUPO_ID, "\n".join(lineas), "HTML")
+    logger.info(f"[grupo] Aviso de inactividad enviado al grupo ({len(usuarios)} usuarios).")
+
 
 async def avisar_nuevos_vencidos(bot) -> None:
     """Avisa al admin si hay nuevos usuarios con plazo vencido. Requiere /expulsarnuevos para expulsar."""
@@ -964,6 +1027,7 @@ async def handler_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/report — Reporte completo TOP5 + DOWN5 + avisos de inactividad\n"
         "/report TOP — Solo TOP 5 más activos\n"
         "/report DOWN — Solo DOWN 5 menos activos\n"
+        "/infouser <userid | @username | nombre> — Info detallada de un usuario\n"
         "\n"
         "🔇 <b>Inactividad general</b>\n"
         "/noparticipa — Lista usuarios sin mensajes desde hace más de "
@@ -1074,6 +1138,73 @@ async def handler_moratoria(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         f"✅ Moratoria aplicada. {afectados} usuario(s) con inactividad reseteada a hoy.\n"
         "El contador de inactividad empieza desde ahora para todos ellos."
     )
+
+
+async def handler_infouser(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Proporciona información detallada de un usuario buscado por ID, username o nombre."""
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    if not context.args:
+        await update.message.reply_text("⚠️ Uso: /infouser <userid | @username | nombre>")
+        return
+
+    termino = " ".join(context.args)
+    usuarios = buscar_usuarios(termino)
+
+    if not usuarios:
+        await update.message.reply_text(f"❌ No se encontró ningún usuario con: <b>{_escape_html(termino)}</b>", parse_mode="HTML")
+        return
+
+    if len(usuarios) > 1:
+        lineas = [f"🔍 <b>Se encontraron {len(usuarios)} coincidencias:</b>\n"]
+        for uid, nom, usr, total, _, _ in usuarios[:5]:
+            alias = f"@{_escape_html(usr)}" if usr else "sin alias"
+            lineas.append(f"• <b>{_escape_html(nom)}</b> ({alias}) — ID: <code>{uid}</code>")
+        if len(usuarios) > 5:
+            lineas.append(f"\n<i>...y {len(usuarios)-5} más. Refina la búsqueda o usa el ID.</i>")
+        await update.message.reply_html("\n".join(lineas))
+        return
+
+    # Un solo usuario encontrado
+    uid, nom, usr, total, ult, reg = usuarios[0]
+    ahora = datetime.now(timezone.utc)
+    
+    # Determinar estado
+    estado = "✅ Activo"
+    limite_warning = (ahora - timedelta(days=MAX_DAYS_INACTIVE_WARNING)).isoformat()
+    limite_removal = (ahora - timedelta(days=MAX_DAYS_INACTIVE_REMOVAL)).isoformat()
+    
+    ref_fecha = ult or reg
+    if ref_fecha:
+        if ref_fecha < limite_removal:
+            estado = "🚨 Candidato a expulsión"
+        elif ref_fecha < limite_warning:
+            estado = "⚠️ Candidato a aviso"
+
+    alias = f"@{_escape_html(usr)}" if usr else "n/a"
+    
+    def format_iso(iso_str):
+        if not iso_str: return "n/a"
+        try:
+            dt = datetime.fromisoformat(iso_str)
+            dias = (ahora - dt).days
+            return f"{dt.strftime('%d/%m/%Y')} ({dias} días)"
+        except: return iso_str
+
+    texto = (
+        f"👤 <b>Información de Usuario</b>\n\n"
+        f"<b>Nombre:</b> {_escape_html(nom)}\n"
+        f"<b>Username:</b> {alias}\n"
+        f"<b>ID:</b> <code>{uid}</code>\n"
+        f"<b>Estado:</b> {estado}\n"
+        f"<b>Mensajes:</b> {total:,}\n"
+        f"<b>Registrado:</b> {format_iso(reg)}\n"
+        f"<b>Último msg:</b> {format_iso(ult)}"
+    )
+    
+    await update.message.reply_html(texto)
+    logger.info(f"[admin] /infouser ejecutado para: {termino}")
 
 
 # ---------------------------------------------------------------------------
@@ -1413,6 +1544,7 @@ def main() -> None:
     app.add_handler(CommandHandler("moratoria",            handler_moratoria,            filters=_admin_privado))
     app.add_handler(CommandHandler("recalcularfechas",     handler_recalcularfechas,     filters=_admin_privado))
     app.add_handler(CommandHandler("report",               handler_report,               filters=_admin_privado))
+    app.add_handler(CommandHandler("infouser",             handler_infouser,             filters=_admin_privado))
     app.add_handler(CommandHandler("kick",                 handler_kick,                 filters=_admin_privado))
     app.add_handler(CommandHandler("nuevos",               handler_nuevos,               filters=_admin_privado))
     app.add_handler(CommandHandler("expulsarnuevos",       handler_expulsarnuevos,       filters=_admin_privado))
