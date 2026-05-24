@@ -24,6 +24,7 @@ import logging
 import os
 import sqlite3
 from datetime import datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from telegram import (
