@@ -135,12 +135,16 @@ def leer_bot_state() -> dict:
         return {}
 
 
-def guardar_bot_state(fecha_arranque: datetime, ultimo_registro: datetime) -> None:
-    """Persiste fecha_arranque y ultimo_registro en bot_state.json."""
-    state = {
+def guardar_bot_state(fecha_arranque: datetime, ultimo_registro: datetime, last_sent: dict | None = None) -> None:
+    """Persiste fecha_arranque, ultimo_registro y opcionalmente last_sent_reports en bot_state.json."""
+    state = leer_bot_state()
+    state.update({
         "fecha_arranque":   fecha_arranque.isoformat(),
         "ultimo_registro":  ultimo_registro.isoformat(),
-    }
+    })
+    if last_sent is not None:
+        state["last_sent_reports"] = last_sent
+    
     with open(BOT_STATE_PATH, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
 
@@ -151,6 +155,43 @@ def leer_ultimo_registro() -> datetime | None:
     if raw is None:
         return None
     return datetime.fromisoformat(raw)
+
+
+def should_send_public_report(report_id: str) -> bool:
+    """
+    Comprueba si un reporte público debe enviarse (máximo una vez al día UTC).
+    Devuelve True si no se ha enviado hoy o nunca se ha enviado.
+    """
+    state = leer_bot_state()
+    last_sent_reports = state.get("last_sent_reports", {})
+    last_date_str = last_sent_reports.get(report_id)
+    
+    if not last_date_str:
+        return True
+    
+    hoy_utc = datetime.now(timezone.utc).date().isoformat()
+    return last_date_str != hoy_utc
+
+
+def mark_public_report_sent(report_id: str) -> None:
+    """Marca un reporte como enviado hoy en bot_state.json."""
+    state = leer_bot_state()
+    last_sent_reports = state.get("last_sent_reports", {})
+    
+    hoy_utc = datetime.now(timezone.utc).date().isoformat()
+    last_sent_reports[report_id] = hoy_utc
+    
+    # Necesitamos fecha_arranque y ultimo_registro para guardar_bot_state
+    # Si no están, usamos valores por defecto (aunque deberían estar si el bot está corriendo)
+    ahora = datetime.now(timezone.utc)
+    try:
+        fecha_arranque = datetime.fromisoformat(state.get("fecha_arranque", ahora.isoformat()))
+        ultimo_reg     = datetime.fromisoformat(state.get("ultimo_registro", ahora.isoformat()))
+    except (ValueError, TypeError):
+        fecha_arranque = ahora
+        ultimo_reg     = ahora
+        
+    guardar_bot_state(fecha_arranque, ultimo_reg, last_sent=last_sent_reports)
 
 
 def registrar_miembro(user_id: int, nombre: str, username: str | None) -> None:
@@ -788,6 +829,11 @@ async def enviar_aviso_grupo_inactivos(bot, usuarios) -> None:
     if not usuarios:
         return
 
+    report_id = "aviso_grupo_inactivos"
+    if not should_send_public_report(report_id):
+        logger.info(f"[grupo] Omitiendo {report_id} (ya enviado hoy).")
+        return
+
     ahora = datetime.now(timezone.utc)
     lineas = [
         "¡Hola a todos! 👋 Todos somos bienvenidos en este grupo, pero recordad que este es un espacio para "
@@ -809,6 +855,7 @@ async def enviar_aviso_grupo_inactivos(bot, usuarios) -> None:
     )
 
     await _send_long_message(bot, GRUPO_ID, "\n".join(lineas), "HTML")
+    mark_public_report_sent(report_id)
     logger.info(f"[grupo] Aviso de inactividad enviado al grupo ({len(usuarios)} usuarios).")
 
 
