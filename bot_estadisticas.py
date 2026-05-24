@@ -24,6 +24,7 @@ import logging
 import os
 import sqlite3
 from datetime import datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from telegram import (
@@ -78,7 +79,8 @@ NEW_USER_WARNING_DAYS_BEFORE = int(os.getenv("NEW_USER_WARNING_DAYS_BEFORE", "3"
 
 DB_PATH        = "estadisticas_grupo.db"
 BOT_STATE_PATH = "bot_state.json"
-HORA_REPORTE   = time(hour=10, minute=0, second=0, tzinfo=timezone.utc)
+MADRID_TZ      = ZoneInfo("Europe/Madrid")
+HORA_REPORTE   = time(hour=7, minute=0, second=0, tzinfo=MADRID_TZ)
 
 # Timestamp del último mensaje procesado; se persiste en bot_state.json al parar
 _ultimo_registro: datetime | None = None
@@ -152,7 +154,7 @@ def leer_ultimo_registro() -> datetime | None:
 
 
 def registrar_miembro(user_id: int, nombre: str, username: str | None) -> None:
-    """Inserta el miembro con 0 mensajes si no existe aún en la BD."""
+    """Inserta the miembro con 0 mensajes si no existe aún en la BD."""
     ahora = datetime.now(timezone.utc).isoformat()
     _conn.execute("""
         INSERT OR IGNORE INTO usuarios
