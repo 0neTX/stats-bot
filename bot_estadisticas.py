@@ -30,6 +30,8 @@ from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from telegram import (
+    BotCommand,
+    BotCommandScopeChat,
     Update,
     ChatMemberUpdated,
     InlineKeyboardButton,
@@ -1142,6 +1144,9 @@ async def handler_nuevos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def handler_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Envía al admin la referencia completa de comandos disponibles."""
+    if update.message is None:
+        logger.warning("[help] update.message es None; ignorando.")
+        return
     texto = (
         "📖 <b>Comandos disponibles</b>\n"
         "\n"
@@ -1149,7 +1154,7 @@ async def handler_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/report — Reporte completo TOP5 + DOWN5 + avisos de inactividad\n"
         "/report TOP — Solo TOP 5 más activos\n"
         "/report DOWN — Solo DOWN 5 menos activos\n"
-        "/infouser <userid | @username | nombre> — Info detallada de un usuario\n"
+        "/infouser &lt;userid | @username | nombre&gt; — Info detallada de un usuario\n"
         "\n"
         "🔇 <b>Inactividad general</b>\n"
         "/noparticipa — Lista usuarios sin mensajes desde hace más de "
@@ -1608,6 +1613,26 @@ async def post_init(application: Application) -> None:
     if NEW_USER_GRACE_PERIOD_DAYS > 0:
         await check_nuevos_proximos_a_vencer(application.bot)
         await avisar_nuevos_vencidos(application.bot)
+
+    # Registrar comandos en el menú de Telegram solo para el admin
+    comandos_admin = [
+        BotCommand("report",              "Reporte TOP5 + DOWN5 + avisos"),
+        BotCommand("infouser",            "Info detallada de un usuario"),
+        BotCommand("noparticipa",         f"Usuarios sin mensajes > {MAX_DAYS_INACTIVE_WARNING}d"),
+        BotCommand("expulsarnoparticipa", "Expulsa listados por /noparticipa"),
+        BotCommand("ok",                  "Confirma expulsiones pendientes"),
+        BotCommand("moratoria",           "Resetea contador de inactividad"),
+        BotCommand("nuevos",              f"Nuevos sin participar (>{NEW_USER_GRACE_PERIOD_DAYS}d)"),
+        BotCommand("expulsarnuevos",      "Expulsa nuevos con plazo vencido"),
+        BotCommand("kick",                "Expulsión interactiva menos activos"),
+        BotCommand("recalcularfechas",    "Re-escanea historial para corregir fechas"),
+        BotCommand("help",                "Muestra este listado de comandos"),
+    ]
+    await application.bot.set_my_commands(
+        comandos_admin,
+        scope=BotCommandScopeChat(chat_id=ADMIN_ID),
+    )
+    logger.info("[arranque] Comandos registrados en el menú de Telegram del admin.")
 
 
 # ---------------------------------------------------------------------------
