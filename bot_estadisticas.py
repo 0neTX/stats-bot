@@ -232,16 +232,18 @@ def obtener_top5() -> list[tuple[int, str, str | None, int, str | None, str | No
 
 
 def obtener_usuarios_inactivos(dias_warning: int) -> list[tuple[int, str, str | None, int, str | None, str | None]]:
-    """Devuelve usuarios inactivos: sin mensajes (por fecha_registro) y con mensajes expirados."""
+    """Devuelve usuarios inactivos: sin mensajes (por fecha de referencia) y con mensajes expirados."""
     limite = (datetime.now(timezone.utc) - timedelta(days=dias_warning)).isoformat()
     cur = _conn.execute("""
         SELECT user_id, nombre, username, total_mensajes, ultimo_mensaje, fecha_registro
         FROM   usuarios
-        WHERE  (total_mensajes = 0 AND (fecha_registro IS NULL OR fecha_registro < ?))
+        WHERE  (total_mensajes = 0
+                AND COALESCE(ultimo_mensaje, fecha_registro) IS NOT NULL
+                AND COALESCE(ultimo_mensaje, fecha_registro) < ?)
            OR  (total_mensajes > 0 AND ultimo_mensaje IS NOT NULL AND ultimo_mensaje < ?)
         ORDER BY
             CASE WHEN total_mensajes = 0 THEN 0 ELSE 1 END ASC,
-            COALESCE(fecha_registro, ultimo_mensaje, '1970-01-01') ASC
+            COALESCE(ultimo_mensaje, fecha_registro, '1970-01-01') ASC
     """, (limite, limite))
     return cur.fetchall()
 
@@ -257,11 +259,13 @@ def obtener_usuarios_para_expulsar() -> list[tuple[int, str, str | None, int, st
     cur = _conn.execute("""
         SELECT user_id, nombre, username, total_mensajes, ultimo_mensaje, fecha_registro
         FROM   usuarios
-        WHERE  (total_mensajes = 0 AND (fecha_registro IS NULL OR fecha_registro < ?))
+        WHERE  (total_mensajes = 0
+                AND COALESCE(ultimo_mensaje, fecha_registro) IS NOT NULL
+                AND COALESCE(ultimo_mensaje, fecha_registro) < ?)
            OR  (total_mensajes > 0 AND ultimo_mensaje IS NOT NULL AND ultimo_mensaje < ?)
         ORDER BY
             CASE WHEN total_mensajes = 0 THEN 0 ELSE 1 END ASC,
-            COALESCE(fecha_registro, ultimo_mensaje, '1970-01-01') ASC
+            COALESCE(ultimo_mensaje, fecha_registro, '1970-01-01') ASC
         LIMIT 10
     """, (limite, limite))
     return cur.fetchall()
