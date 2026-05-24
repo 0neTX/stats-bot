@@ -19,9 +19,11 @@ Uso:
   python bot_estadisticas.py
 """
 
+import asyncio
 import json
 import logging
 import os
+import re
 import sqlite3
 from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -33,7 +35,7 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
 )
-from telegram.error import BadRequest
+from telegram.error import BadRequest, RetryAfter
 from telegram.ext import (
     Application,
     ChatMemberHandler,
@@ -288,7 +290,7 @@ def obtener_usuarios_inactivos(dias_warning: int) -> list[tuple[int, str, str | 
 
 
 def obtener_usuarios_para_expulsar() -> list[tuple[int, str, str | None, int, str | None, str | None]]:
-    """Devuelve hasta 10 usuarios a expulsar ordenados por prioridad.
+    """Devuelve los usuarios a expulsar ordenados por prioridad.
 
     Prioridad: sin mensajes (total_mensajes=0, por fecha_registro) primero, con mensajes después.
     Dentro de cada grupo, los más inactivos primero.
@@ -303,7 +305,6 @@ def obtener_usuarios_para_expulsar() -> list[tuple[int, str, str | None, int, st
         ORDER BY
             CASE WHEN total_mensajes = 0 THEN 0 ELSE 1 END ASC,
             COALESCE(fecha_registro, ultimo_mensaje, '1970-01-01') ASC
-        LIMIT 10
     """, (limite, limite))
     return cur.fetchall()
 
@@ -334,7 +335,6 @@ def buscar_usuarios(termino: str) -> list[tuple[int, str, str | None, int, str |
         SELECT user_id, nombre, username, total_mensajes, ultimo_mensaje, fecha_registro
         FROM   usuarios
         WHERE  nombre LIKE ?
-        LIMIT 10
     """, (f"%{termino}%",))
     return cur.fetchall()
 
@@ -365,6 +365,34 @@ def obtener_down5() -> list[tuple[int, str, str | None, int, str | None, str | N
 # ---------------------------------------------------------------------------
 # Handlers
 # ---------------------------------------------------------------------------
+
+async def handler_unauthorized(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Detecta mensajes privados de no-admins y avisa al ADMIN_ID."""
+    user = update.effective_user
+    msg  = update.effective_message
+    
+    if user is None or user.id == ADMIN_ID or user.is_bot:
+        return
+
+    # Solo nos interesan mensajes privados (no del grupo)
+    if update.effective_chat.type != "private":
+        return
+
+    nombre = _escape_html(f"{user.first_name or ''} {user.last_name or ''}".strip() or str(user.id))
+    username = f"@{_escape_html(user.username)}" if user.username else "n/a"
+    texto_msg = _escape_html(msg.text or msg.caption or "[mensaje sin texto]")
+    
+    aviso = (
+        "⚠️ <b>Intento de acceso no autorizado</b>\n\n"
+        f"<b>Usuario:</b> {nombre}\n"
+        f"<b>Username:</b> {username}\n"
+        f"<b>ID:</b> <code>{user.id}</code>\n\n"
+        f"<b>Mensaje:</b>\n{texto_msg}"
+    )
+    
+    await _send_long_message(context.bot, ADMIN_ID, aviso, "HTML")
+    logger.info(f"Intento de acceso no autorizado de {nombre} (id={user.id}) notificado al admin.")
+
 
 async def handler_miembro(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Registra o elimina usuarios de la BD según entren o salgan del grupo."""
@@ -510,7 +538,7 @@ def _escape_html(text: str) -> str:
 
 async def _ejecutar_expulsion(bot, user_id: int, nombre: str,
                                username: str | None, tag: str) -> tuple[str, str]:
-    """Ban + unban de un usuario con manejo diferenciado de errores.
+    """Ban + unban de un usuario con manejo diferenciado de errores (incluye RetryAfter).
 
     Devuelve (estado, texto) donde estado es:
       "expulsado" — ban+unban exitosos, eliminado de BD
@@ -524,6 +552,11 @@ async def _ejecutar_expulsion(bot, user_id: int, nombre: str,
         eliminar_miembro(user_id)
         logger.info(f"[{tag}] Expulsado: {nombre} ({alias})")
         return "expulsado", f"• {_escape_html(nombre)} ({alias})"
+    except RetryAfter as exc:
+        logger.warning(f"FloodWait detectado: esperando {exc.retry_after} segundos...")
+        await asyncio.sleep(exc.retry_after)
+        # Reintentar la operación
+        return await _ejecutar_expulsion(bot, user_id, nombre, username, tag)
     except BadRequest as exc:
         if "participant_id_invalid" in str(exc).lower():
             eliminar_miembro(user_id)
@@ -559,26 +592,57 @@ _TELEGRAM_MAX_LEN = 4096
 
 
 async def _send_long_message(bot, chat_id: int, texto: str, parse_mode: str) -> None:
-    """Envía un texto al chat partiéndolo por líneas completas si supera el límite."""
+    """Envía un texto al chat partiéndolo por líneas, respetando la integridad de HTML si se usa."""
+    if parse_mode != "HTML":
+        # Comportamiento simple para otros modos
+        trozo: list[str] = []
+        longitud = 0
+        for linea in texto.splitlines(keepends=True):
+            if longitud + len(linea) > _TELEGRAM_MAX_LEN and trozo:
+                await bot.send_message(chat_id=chat_id, text="".join(trozo), parse_mode=parse_mode)
+                trozo, longitud = [], 0
+            trozo.append(linea)
+            longitud += len(linea)
+        if trozo:
+            await bot.send_message(chat_id=chat_id, text="".join(trozo), parse_mode=parse_mode)
+        return
+
+    # Lógica avanzada para HTML
     trozo: list[str] = []
     longitud = 0
+    stack_tags: list[str] = []
+    re_tag = re.compile(r'<(/?)(b|i|code|a|pre|u|s|strike|del|span)[^>]*>')
+
     for linea in texto.splitlines(keepends=True):
-        if longitud + len(linea) > _TELEGRAM_MAX_LEN and trozo:
-            await bot.send_message(
-                chat_id=chat_id,
-                text="".join(trozo),
-                parse_mode=parse_mode,
-            )
-            trozo = []
-            longitud = 0
+        # Estimamos espacio extra para etiquetas de cierre/apertura automáticas
+        espacio_reserva = len(stack_tags) * 15 
+        if longitud + len(linea) + espacio_reserva > _TELEGRAM_MAX_LEN and trozo:
+            mensaje_a_enviar = "".join(trozo)
+            for tag in reversed(stack_tags):
+                mensaje_a_enviar += f"</{tag}>"
+            
+            await bot.send_message(chat_id=chat_id, text=mensaje_a_enviar, parse_mode="HTML")
+            
+            # Reset y reabrir etiquetas en el nuevo trozo
+            trozo = [f"<{tag}>" for tag in stack_tags]
+            longitud = sum(len(s) for s in trozo)
+        
+        # Actualizar stack de etiquetas con la línea actual
+        for slash, tag in re_tag.findall(linea):
+            if slash:
+                if stack_tags and stack_tags[-1] == tag:
+                    stack_tags.pop()
+            else:
+                stack_tags.append(tag)
+                
         trozo.append(linea)
         longitud += len(linea)
+
     if trozo:
-        await bot.send_message(
-            chat_id=chat_id,
-            text="".join(trozo),
-            parse_mode=parse_mode,
-        )
+        mensaje_final = "".join(trozo)
+        for tag in reversed(stack_tags):
+            mensaje_final += f"</{tag}>"
+        await bot.send_message(chat_id=chat_id, text=mensaje_final, parse_mode="HTML")
 
 
 async def enviar_aviso_inactivos(bot) -> None:
@@ -683,6 +747,9 @@ async def handler_ok(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             ausentes.append(texto)
         else:
             errores.append(texto)
+        
+        # Rate limiting artificial para evitar FloodControl
+        await asyncio.sleep(0.5)
 
     _pendientes_expulsion.clear()
 
@@ -906,6 +973,9 @@ async def handler_expulsarnoparticipa(update: Update, context: ContextTypes.DEFA
             ausentes.append(texto)
         else:
             errores.append(texto)
+        
+        # Rate limiting artificial para evitar FloodControl
+        await asyncio.sleep(0.5)
 
     _pendientes_noparticipa.clear()
 
@@ -996,6 +1066,9 @@ async def handler_callback_nuevos(update: Update, context: ContextTypes.DEFAULT_
                 ausentes.append(texto)
             else:
                 errores.append(texto)
+            
+            # Rate limiting artificial para evitar FloodControl
+            await asyncio.sleep(0.5)
 
         _pendientes_nuevos = []
 
@@ -1378,6 +1451,9 @@ async def handler_callback_kick(update: Update, context: ContextTypes.DEFAULT_TY
                 ausentes.append(texto)
             else:
                 errores.append(texto)
+            
+            # Rate limiting artificial para evitar FloodControl
+            await asyncio.sleep(0.5)
 
         _pendientes_kick = []
 
@@ -1598,6 +1674,9 @@ def main() -> None:
     app.add_handler(CommandHandler("nuevos",               handler_nuevos,               filters=_admin_privado))
     app.add_handler(CommandHandler("expulsarnuevos",       handler_expulsarnuevos,       filters=_admin_privado))
     app.add_handler(CommandHandler("help",                 handler_help,                 filters=_admin_privado))
+
+    # Notificaciones de acceso no autorizado (para cualquier mensaje privado no capturado por filtros de admin)
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE, handler_unauthorized))
 
     app.add_handler(CallbackQueryHandler(handler_callback_kick,   pattern="^kick_"))
     app.add_handler(CallbackQueryHandler(handler_callback_nuevos, pattern="^nuevos_"))
