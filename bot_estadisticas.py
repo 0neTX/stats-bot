@@ -653,6 +653,10 @@ async def enviar_aviso_inactivos(bot) -> None:
     if not inactivos:
         logger.info("[inactividad] No hay usuarios que superen el umbral de aviso.")
         return
+    inactivos, eliminados = await _filtrar_miembros_activos(bot, inactivos)
+    if not inactivos:
+        logger.info("[inactividad] No quedan inactivos tras validar membresía en el grupo.")
+        return
 
     logger.info(f"[inactividad] {len(inactivos)} usuario(s) superan "
                 f"{MAX_DAYS_INACTIVE_WARNING} días de inactividad:")
@@ -697,7 +701,9 @@ async def enviar_aviso_inactivos(bot) -> None:
 async def enviar_reporte_expulsion(bot) -> None:
     """Detecta usuarios que superan MAX_DAYS_INACTIVE_REMOVAL y envía el reporte al admin."""
     global _pendientes_expulsion
-    _pendientes_expulsion = obtener_usuarios_para_expulsar()
+    candidatos = obtener_usuarios_para_expulsar()
+    candidatos, eliminados = await _filtrar_miembros_activos(bot, candidatos)
+    _pendientes_expulsion = candidatos
 
     if not _pendientes_expulsion:
         logger.info("[expulsión] No hay usuarios que superen el plazo de expulsión.")
@@ -711,6 +717,8 @@ async def enviar_reporte_expulsion(bot) -> None:
         f"Han superado el plazo de {MAX_DAYS_INACTIVE_REMOVAL} días de inactividad. "
         "Responde /ok para expulsarlos del grupo.\n",
     ]
+    if eliminados:
+        lineas.append(f"ℹ️ {eliminados} usuario(s) ya no estaban en el grupo y han sido eliminados de BD.\n")
 
     for user_id, nombre, username, total, ultimo, registro in _pendientes_expulsion:
         alias        = f"@{username}" if username else f"id:{user_id}"
@@ -853,7 +861,8 @@ async def _filtrar_miembros_activos(
 
     Elimina de BD a los que ya no están (left/kicked o no encontrados).
     Devuelve (lista_filtrada, num_eliminados).
-    En caso de error inesperado de la API conserva el usuario en la lista.
+    Maneja RetryAfter con un reintento automático.
+    En caso de error irrecuperable conserva el usuario en la lista.
     """
     activos: list[tuple] = []
     eliminados = 0
@@ -868,6 +877,19 @@ async def _filtrar_miembros_activos(
                 logger.info(f"[validacion] {nombre} ({alias}) ya no está en el grupo — eliminado de BD.")
             else:
                 activos.append(row)
+        except RetryAfter as exc:
+            logger.warning(f"[validacion] FloodWait {exc.retry_after}s — reintentando {nombre} ({alias}).")
+            await asyncio.sleep(exc.retry_after)
+            try:
+                member = await bot.get_chat_member(chat_id=GRUPO_ID, user_id=user_id)
+                if member.status in ("left", "kicked"):
+                    eliminar_miembro(user_id)
+                    eliminados += 1
+                    logger.info(f"[validacion] {nombre} ({alias}) ya no está en el grupo — eliminado de BD.")
+                else:
+                    activos.append(row)
+            except Exception:
+                activos.append(row)
         except BadRequest:
             eliminar_miembro(user_id)
             eliminados += 1
@@ -875,15 +897,21 @@ async def _filtrar_miembros_activos(
         except Exception as exc:
             logger.warning(f"[validacion] Error verificando {nombre} ({alias}): {exc} — incluido en informe.")
             activos.append(row)
+        await asyncio.sleep(0.05)
     return activos, eliminados
 
 
 async def handler_noparticipa(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     global _pendientes_noparticipa
-    _pendientes_noparticipa = obtener_usuarios_sin_mensajes()
+    candidatos = obtener_usuarios_sin_mensajes()
+    candidatos, eliminados = await _filtrar_miembros_activos(context.bot, candidatos)
+    _pendientes_noparticipa = candidatos
 
     if not _pendientes_noparticipa:
-        await update.message.reply_text("No hay usuarios sin mensajes que superen el umbral.")
+        msg = "No hay usuarios sin mensajes que superen el umbral."
+        if eliminados:
+            msg += f"\n({eliminados} usuario(s) ya no estaban en el grupo y han sido eliminados de BD.)"
+        await update.message.reply_text(msg)
         return
 
     lineas = [
@@ -891,6 +919,8 @@ async def handler_noparticipa(update: Update, context: ContextTypes.DEFAULT_TYPE
         f"Llevan más de {MAX_DAYS_INACTIVE_WARNING} días en el grupo sin participar.\n",
         "Responde /expulsarnoparticipa para expulsarlos.\n",
     ]
+    if eliminados:
+        lineas.append(f"ℹ️ {eliminados} usuario(s) ya no estaban en el grupo y han sido eliminados de BD.\n")
     for user_id, nombre, username, _, fecha_reg in _pendientes_noparticipa:
         alias = f"@{username}" if username else f"id:{user_id}"
         desde = datetime.fromisoformat(fecha_reg).strftime('%d/%m/%Y') if fecha_reg else "desconocido"
