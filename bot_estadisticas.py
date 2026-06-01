@@ -846,6 +846,38 @@ def obtener_todos_nuevos_sin_mensajes() -> list[tuple[int, str, str | None, int,
     return cur.fetchall()
 
 
+async def _filtrar_miembros_activos(
+    bot, usuarios: list[tuple]
+) -> tuple[list[tuple], int]:
+    """Verifica que cada usuario siga en el grupo antes de incluirlo en un informe.
+
+    Elimina de BD a los que ya no están (left/kicked o no encontrados).
+    Devuelve (lista_filtrada, num_eliminados).
+    En caso de error inesperado de la API conserva el usuario en la lista.
+    """
+    activos: list[tuple] = []
+    eliminados = 0
+    for row in usuarios:
+        user_id, nombre, username = row[0], row[1], row[2]
+        alias = f"@{username}" if username else f"id:{user_id}"
+        try:
+            member = await bot.get_chat_member(chat_id=GRUPO_ID, user_id=user_id)
+            if member.status in ("left", "kicked"):
+                eliminar_miembro(user_id)
+                eliminados += 1
+                logger.info(f"[validacion] {nombre} ({alias}) ya no está en el grupo — eliminado de BD.")
+            else:
+                activos.append(row)
+        except BadRequest:
+            eliminar_miembro(user_id)
+            eliminados += 1
+            logger.info(f"[validacion] {nombre} ({alias}) no encontrado en el grupo — eliminado de BD.")
+        except Exception as exc:
+            logger.warning(f"[validacion] Error verificando {nombre} ({alias}): {exc} — incluido en informe.")
+            activos.append(row)
+    return activos, eliminados
+
+
 async def handler_noparticipa(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     global _pendientes_noparticipa
     _pendientes_noparticipa = obtener_usuarios_sin_mensajes()
@@ -871,6 +903,9 @@ async def handler_noparticipa(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def check_nuevos_proximos_a_vencer(bot) -> None:
     """Avisa al admin si hay nuevos usuarios que vencen en exactamente NEW_USER_WARNING_DAYS_BEFORE días."""
     usuarios = obtener_nuevos_usuarios_a_avisar()
+    if not usuarios:
+        return
+    usuarios, _ = await _filtrar_miembros_activos(bot, usuarios)
     if not usuarios:
         return
     dias_restantes = NEW_USER_WARNING_DAYS_BEFORE
@@ -931,6 +966,9 @@ async def enviar_aviso_grupo_inactivos(bot, usuarios) -> None:
 async def avisar_nuevos_vencidos(bot) -> None:
     """Avisa al admin si hay nuevos usuarios con plazo vencido. Requiere /expulsarnuevos para expulsar."""
     usuarios = obtener_nuevos_usuarios_a_expulsar()
+    if not usuarios:
+        return
+    usuarios, _ = await _filtrar_miembros_activos(bot, usuarios)
     if not usuarios:
         return
     ahora = datetime.now(timezone.utc)
@@ -1093,6 +1131,7 @@ async def handler_nuevos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     usuarios = obtener_todos_nuevos_sin_mensajes()
+    usuarios, eliminados = await _filtrar_miembros_activos(context.bot, usuarios)
     ahora = datetime.now(timezone.utc)
 
     en_periodo: list[str] = []
@@ -1117,12 +1156,15 @@ async def handler_nuevos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
 
     if not en_periodo and not vencidos:
-        await update.message.reply_text(
-            f"No hay nuevos usuarios sin participar en los últimos {NEW_USER_GRACE_PERIOD_DAYS + 1} días."
-        )
+        msg = f"No hay nuevos usuarios sin participar en los últimos {NEW_USER_GRACE_PERIOD_DAYS + 1} días."
+        if eliminados:
+            msg += f"\n({eliminados} usuario(s) ya no estaban en el grupo y han sido eliminados de BD.)"
+        await update.message.reply_text(msg)
         return
 
     lineas = [f"📋 <b>Nuevos usuarios sin participar</b> (período: {NEW_USER_GRACE_PERIOD_DAYS} días)\n"]
+    if eliminados:
+        lineas.append(f"ℹ️ {eliminados} usuario(s) ya no estaban en el grupo y han sido eliminados de BD.\n")
 
     if en_periodo:
         lineas.append(f"⏳ <b>En período de gracia ({len(en_periodo)})</b>\n")
