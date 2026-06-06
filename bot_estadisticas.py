@@ -81,6 +81,11 @@ MAX_DAYS_INACTIVE_REMOVAL  = int(os.getenv("MAX_DAYS_INACTIVE_REMOVAL", "60"))
 NEW_USER_GRACE_PERIOD_DAYS   = int(os.getenv("NEW_USER_GRACE_PERIOD_DAYS", "7"))
 NEW_USER_WARNING_DAYS_BEFORE = int(os.getenv("NEW_USER_WARNING_DAYS_BEFORE", "3"))
 
+# Probación de nuevos integrantes (plazos cortos con expulsión automática)
+PROBATION_ENABLED        = os.getenv("PROBATION_ENABLED", "True").lower() == "true"
+PROBATION_DEADLINE_1_MIN = int(os.getenv("PROBATION_DEADLINE_1_MIN", "15"))
+PROBATION_DEADLINE_2_MIN = int(os.getenv("PROBATION_DEADLINE_2_MIN", "2"))
+
 DB_PATH        = "estadisticas_grupo.db"
 BOT_STATE_PATH = "bot_state.json"
 MADRID_TZ      = ZoneInfo("Europe/Madrid")
@@ -119,6 +124,23 @@ def get_conn() -> sqlite3.Connection:
         SET    fecha_registro = COALESCE(ultimo_mensaje, ?)
         WHERE  fecha_registro IS NULL
     """, (ahora,))
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS probacion (
+            user_id        INTEGER PRIMARY KEY,
+            nombre         TEXT,
+            welcome_msg_id INTEGER,
+            warning_msg_id INTEGER,
+            expiry_date    TEXT,
+            status         INTEGER DEFAULT 0
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS config (
+            clave TEXT PRIMARY KEY,
+            valor TEXT
+        )
+    """)
     conn.commit()
     return conn
 
@@ -212,6 +234,60 @@ def registrar_miembro(user_id: int, nombre: str, username: str | None) -> None:
 def eliminar_miembro(user_id: int) -> None:
     """Elimina al usuario de la BD cuando sale o es expulsado del grupo."""
     _conn.execute("DELETE FROM usuarios WHERE user_id = ?", (user_id,))
+    _conn.execute("DELETE FROM probacion WHERE user_id = ?", (user_id,))
+    _conn.commit()
+
+
+def registrar_probacion(user_id: int, nombre: str, welcome_msg_id: int, expiry_date: datetime) -> None:
+    """Registra a un usuario en el periodo de probación inicial."""
+    _conn.execute("""
+        INSERT OR REPLACE INTO probacion (user_id, nombre, welcome_msg_id, expiry_date, status)
+        VALUES (?, ?, ?, ?, 0)
+    """, (user_id, nombre, welcome_msg_id, expiry_date.isoformat()))
+    _conn.commit()
+
+
+def actualizar_probacion(user_id: int, warning_msg_id: int, expiry_date: datetime, status: int) -> None:
+    """Actualiza el estado de probación (p.ej. tras enviar el aviso)."""
+    _conn.execute("""
+        UPDATE probacion
+        SET warning_msg_id = ?, expiry_date = ?, status = ?
+        WHERE user_id = ?
+    """, (warning_msg_id, expiry_date.isoformat(), status, user_id))
+    _conn.commit()
+
+
+def obtener_usuario_probacion(user_id: int) -> tuple | None:
+    """Obtiene los datos de probación de un usuario."""
+    cursor = _conn.execute(
+        "SELECT welcome_msg_id, warning_msg_id, expiry_date, status FROM probacion WHERE user_id = ?",
+        (user_id,)
+    )
+    return cursor.fetchone()
+
+
+def obtener_todos_probacion() -> list[tuple]:
+    """Obtiene todos los usuarios en periodo de probación."""
+    cursor = _conn.execute("SELECT user_id, nombre, welcome_msg_id, warning_msg_id, expiry_date, status FROM probacion")
+    return cursor.fetchall()
+
+
+def eliminar_probacion(user_id: int) -> None:
+    """Elimina al usuario del periodo de probación (p.ej. porque ya participó)."""
+    _conn.execute("DELETE FROM probacion WHERE user_id = ?", (user_id,))
+    _conn.commit()
+
+
+def obtener_config(clave: str, default: str | None = None) -> str | None:
+    """Obtiene un valor de configuración de la BD."""
+    cursor = _conn.execute("SELECT valor FROM config WHERE clave = ?", (clave,))
+    fila = cursor.fetchone()
+    return fila[0] if fila else default
+
+
+def guardar_config(clave: str, valor: str) -> None:
+    """Guarda un valor de configuración en la BD."""
+    _conn.execute("INSERT OR REPLACE INTO config (clave, valor) VALUES (?, ?)", (clave, valor))
     _conn.commit()
 
 
@@ -415,6 +491,31 @@ async def handler_miembro(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         registrar_miembro(usuario.id, nombre, usuario.username)
         logger.info(f"Miembro registrado: {nombre} (id={usuario.id})")
+
+        # Iniciar periodo de probación si está habilitado
+        if PROBATION_ENABLED:
+            expiry = datetime.now(timezone.utc) + timedelta(minutes=PROBATION_DEADLINE_1_MIN)
+            
+            # Obtener plantilla personalizada o usar la por defecto
+            template = obtener_config("welcome_template")
+            if template:
+                txt_bienvenida = template.replace("{nombre}", _escape_html(nombre)) \
+                                         .replace("{id}", str(usuario.id)) \
+                                         .replace("{minutos}", str(PROBATION_DEADLINE_1_MIN))
+            else:
+                txt_bienvenida = (
+                    f"👋 ¡Bienvenido/a <b>{_escape_html(nombre)}</b>!\n\n"
+                    f"Para mantener el grupo seguro y activo, tienes <b>{PROBATION_DEADLINE_1_MIN} minutos</b> "
+                    "para enviar un mensaje (saludo o participación) o serás expulsado/a automáticamente."
+                )
+
+            try:
+                msg_b = await context.bot.send_message(chat_id=GRUPO_ID, text=txt_bienvenida, parse_mode="HTML")
+                registrar_probacion(usuario.id, nombre, msg_b.message_id, expiry)
+                logger.info(f"Probación iniciada para {nombre} (id={usuario.id}). Expira: {expiry}")
+            except Exception as e:
+                logger.error(f"Error al enviar mensaje de bienvenida a {usuario.id}: {e}")
+
     elif nuevo.status in estados_salida:
         eliminar_miembro(usuario.id)
         logger.info(f"Miembro eliminado: id={usuario.id} (estado={nuevo.status})")
@@ -431,6 +532,15 @@ async def handler_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         f"{user.first_name or ''} {user.last_name or ''}".strip()
         or str(user.id)
     )
+
+    # Limpiar periodo de probación si el usuario participa
+    prob = obtener_usuario_probacion(user.id)
+    if prob:
+        w_msg_id, a_msg_id, _, _ = prob
+        await _borrar_mensajes(context.bot, GRUPO_ID, [w_msg_id, a_msg_id])
+        eliminar_probacion(user.id)
+        logger.info(f"Probación superada por {nombre} (id={user.id}).")
+
     username = user.username
     fecha    = msg.date
 
@@ -593,6 +703,16 @@ def _construir_resultado_expulsion(expulsados: list[str],
 _TELEGRAM_MAX_LEN = 4096
 
 
+async def _borrar_mensajes(bot, chat_id: int, message_ids: list[int | None]) -> None:
+    """Borra una lista de mensajes del chat de forma silenciosa."""
+    for msg_id in message_ids:
+        if msg_id:
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=msg_id)
+            except Exception as e:
+                logger.debug(f"No se pudo borrar el mensaje {msg_id}: {e}")
+
+
 async def _send_long_message(bot, chat_id: int, texto: str, parse_mode: str) -> None:
     """Envía un texto al chat partiéndolo por líneas, respetando la integridad de HTML si se usa."""
     if parse_mode != "HTML":
@@ -732,6 +852,26 @@ async def enviar_reporte_expulsion(bot) -> None:
 
     await _send_long_message(bot, ADMIN_ID, "\n".join(lineas), "HTML")
     logger.info(f"[expulsión] Reporte enviado al admin (id={ADMIN_ID}). Esperando /ok ...")
+
+
+async def handler_setwelcome(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Configura el mensaje de bienvenida dinámico."""
+    if not context.args:
+        actual = obtener_config("welcome_template")
+        if not actual:
+            await update.message.reply_html(
+                "No hay un mensaje personalizado configurado.\n"
+                "Uso: <code>/setwelcome Hola {nombre}, tienes {minutos} min para saludar.</code>\n\n"
+                "Variables disponibles: <code>{nombre}</code>, <code>{id}</code>, <code>{minutos}</code>"
+            )
+        else:
+            await update.message.reply_html(f"Mensaje actual:\n\n{actual}")
+        return
+
+    nuevo_mensaje = " ".join(context.args)
+    guardar_config("welcome_template", nuevo_mensaje)
+    await update.message.reply_html("✅ Mensaje de bienvenida actualizado correctamente.")
+    logger.info(f"Admin actualizó el mensaje de bienvenida: {nuevo_mensaje}")
 
 
 async def handler_ok(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1228,6 +1368,10 @@ async def handler_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/report DOWN — Solo DOWN 5 menos activos\n"
         "/infouser &lt;userid | @username | nombre&gt; — Info detallada de un usuario\n"
         "\n"
+        "✨ <b>Personalización</b>\n"
+        "/setwelcome &lt;mensaje&gt; — Configura el saludo de nuevos integrantes\n"
+        "  Variables: {nombre}, {id}, {minutos}\n"
+        "\n"
         "🔇 <b>Inactividad general</b>\n"
         "/noparticipa — Lista usuarios sin mensajes desde hace más de "
         f"{MAX_DAYS_INACTIVE_WARNING} días\n"
@@ -1690,6 +1834,7 @@ async def post_init(application: Application) -> None:
     comandos_admin = [
         BotCommand("report",              "Reporte TOP5 + DOWN5 + avisos"),
         BotCommand("infouser",            "Info detallada de un usuario"),
+        BotCommand("setwelcome",          "Configura el mensaje de bienvenida"),
         BotCommand("noparticipa",         f"Usuarios sin mensajes > {MAX_DAYS_INACTIVE_WARNING}d"),
         BotCommand("expulsarnoparticipa", "Expulsa listados por /noparticipa"),
         BotCommand("ok",                  "Confirma expulsiones pendientes"),
@@ -1705,6 +1850,45 @@ async def post_init(application: Application) -> None:
         scope=BotCommandScopeChat(chat_id=ADMIN_ID),
     )
     logger.info("[arranque] Comandos registrados en el menú de Telegram del admin.")
+
+
+async def job_revisar_probacion(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Tarea periódica que revisa los periodos de probación y actúa si vencen."""
+    ahora = datetime.now(timezone.utc)
+    usuarios = obtener_todos_probacion()
+
+    for user_id, nombre, w_msg_id, a_msg_id, expiry_str, status in usuarios:
+        expiry = datetime.fromisoformat(expiry_str)
+        if ahora > expiry:
+            if status == 0:
+                # Primer plazo vencido (15m): enviar aviso
+                expiry_aviso = ahora + timedelta(minutes=PROBATION_DEADLINE_2_MIN)
+                txt_aviso = (
+                    f"⚠️ <b>Atención {_escape_html(nombre)}</b>:\n\n"
+                    f"Han pasado {PROBATION_DEADLINE_1_MIN} minutos sin participación. "
+                    f"Te quedan <b>{PROBATION_DEADLINE_2_MIN} minutos</b> para enviar un mensaje "
+                    "o serás expulsado/a automáticamente."
+                )
+                try:
+                    msg_a = await context.bot.send_message(chat_id=GRUPO_ID, text=txt_aviso, parse_mode="HTML")
+                    actualizar_probacion(user_id, msg_a.message_id, expiry_aviso, 1)
+                    logger.info(f"Aviso de probación enviado a {nombre} (id={user_id}). Nuevo plazo: {expiry_aviso}")
+                except Exception as e:
+                    logger.error(f"Error al enviar aviso de probación a {user_id}: {e}")
+            
+            elif status == 1:
+                # Segundo plazo vencido (2m): expulsar
+                try:
+                    # Expulsar (ban + unban silencioso)
+                    await context.bot.ban_chat_member(chat_id=GRUPO_ID, user_id=user_id)
+                    await context.bot.unban_chat_member(chat_id=GRUPO_ID, user_id=user_id)
+                    
+                    # Limpiar mensajes y BD
+                    await _borrar_mensajes(context.bot, GRUPO_ID, [w_msg_id, a_msg_id])
+                    eliminar_miembro(user_id)
+                    logger.info(f"Usuario {nombre} (id={user_id}) expulsado automáticamente por inactividad inicial.")
+                except Exception as e:
+                    logger.error(f"Error al expulsar al usuario {user_id} por probación: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -1761,6 +1945,7 @@ def main() -> None:
 
     _admin_privado = filters.ChatType.PRIVATE & filters.User(ADMIN_ID)
     app.add_handler(CommandHandler("ok",                   handler_ok,                   filters=_admin_privado))
+    app.add_handler(CommandHandler("setwelcome",           handler_setwelcome,           filters=_admin_privado))
     app.add_handler(CommandHandler("noparticipa",          handler_noparticipa,          filters=_admin_privado))
     app.add_handler(CommandHandler("expulsarnoparticipa",  handler_expulsarnoparticipa,  filters=_admin_privado))
     app.add_handler(CommandHandler("moratoria",            handler_moratoria,            filters=_admin_privado))
@@ -1779,6 +1964,12 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(handler_callback_nuevos, pattern="^nuevos_"))
 
     job_queue = app.job_queue
+    job_queue.run_repeating(
+        callback=job_revisar_probacion,
+        interval=30,
+        first=10,
+        name="revisar_probacion",
+    )
     job_queue.run_daily(
         callback=enviar_resumen_diario,
         time=HORA_REPORTE,
