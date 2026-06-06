@@ -135,6 +135,12 @@ def get_conn() -> sqlite3.Connection:
             status         INTEGER DEFAULT 0
         )
     """)
+    # Migración: añadir nombre si la tabla probacion ya existía sin esa columna
+    try:
+        conn.execute("ALTER TABLE probacion ADD COLUMN nombre TEXT")
+    except sqlite3.OperationalError:
+        pass  # la columna ya existe
+    
     conn.execute("""
         CREATE TABLE IF NOT EXISTS config (
             clave TEXT PRIMARY KEY,
@@ -1858,8 +1864,33 @@ async def job_revisar_probacion(context: ContextTypes.DEFAULT_TYPE) -> None:
     usuarios = obtener_todos_probacion()
 
     for user_id, nombre, w_msg_id, a_msg_id, expiry_str, status in usuarios:
-        expiry = datetime.fromisoformat(expiry_str)
+        try:
+            expiry = datetime.fromisoformat(expiry_str)
+        except (ValueError, TypeError) as e:
+            logger.error(f"[probacion] Error en formato de fecha para {user_id}: {expiry_str}. Eliminando registro.")
+            eliminar_probacion(user_id)
+            continue
+
         if ahora > expiry:
+            logger.info(f"[probacion] Vencimiento detectado para {nombre} (id={user_id}, status={status}).")
+            # Antes de actuar, verificar si el usuario sigue en el grupo
+            try:
+                member = await context.bot.get_chat_member(chat_id=GRUPO_ID, user_id=user_id)
+                if member.status in ("left", "kicked"):
+                    await _borrar_mensajes(context.bot, GRUPO_ID, [w_msg_id, a_msg_id])
+                    eliminar_miembro(user_id)
+                    logger.info(f"Usuario {nombre} (id={user_id}) ya no está en el grupo. Limpiando probación.")
+                    continue
+            except BadRequest:
+                # Usuario no encontrado
+                await _borrar_mensajes(context.bot, GRUPO_ID, [w_msg_id, a_msg_id])
+                eliminar_miembro(user_id)
+                logger.info(f"Usuario {nombre} (id={user_id}) no encontrado. Limpiando probación.")
+                continue
+            except Exception as e:
+                logger.warning(f"Error comprobando membresía de {user_id} en probación: {e}")
+                continue
+
             if status == 0:
                 # Primer plazo vencido (15m): enviar aviso
                 expiry_aviso = ahora + timedelta(minutes=PROBATION_DEADLINE_2_MIN)
