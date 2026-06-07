@@ -507,11 +507,14 @@ async def handler_miembro(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             f"{usuario.first_name or ''} {usuario.last_name or ''}".strip()
             or str(usuario.id)
         )
-        registrar_miembro(usuario.id, nombre, usuario.username)
+                registrar_miembro(usuario.id, nombre, usuario.username)
         logger.info(f"Miembro registrado: {nombre} (id={usuario.id})")
 
         # Iniciar periodo de probación si está habilitado
         if PROBATION_ENABLED:
+            # Añadimos un pequeño retraso para que el mensaje aparezca DESPUÉS de la notificación de Telegram
+            await asyncio.sleep(2)
+            
             expiry = datetime.now(timezone.utc) + timedelta(minutes=PROBATION_DEADLINE_1_MIN)
             
             # Obtener plantilla personalizada o usar la por defecto
@@ -960,7 +963,12 @@ async def handler_callback_gate(update: Update, context: ContextTypes.DEFAULT_TY
     await query.answer("¡Solicitud aprobada! Ya puedes entrar.")
     try:
         await context.bot.approve_chat_join_request(chat_id=GRUPO_ID, user_id=target_user_id)
-        await query.edit_message_text("✅ <b>¡Solicitud aprobada!</b> Ya eres miembro del grupo.", parse_mode="HTML")
+        msg_aprobacion = (
+            "✅ <b>¡Solicitud aprobada!</b> Ya puedes entrar al grupo.\n\n"
+            f"⚠️ <b>RECUERDA</b>: Tienes <b>{PROBATION_DEADLINE_1_MIN} minutos</b> para saludar o participar "
+            "en el grupo o serás expulsado/a automáticamente."
+        )
+        await query.edit_message_text(msg_aprobacion, parse_mode="HTML")
         logger.info(f"[gate] Usuario {target_user_id} aprobado vía botón.")
     except Exception as e:
         logger.error(f"[gate] Error al aprobar usuario {target_user_id}: {e}")
