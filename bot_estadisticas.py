@@ -520,7 +520,9 @@ async def handler_miembro(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             # Obtener plantilla personalizada o usar la por defecto
             template = obtener_config("welcome_template")
             if template:
+                username_txt = f"@{_escape_html(usuario.username)}" if usuario.username else "n/a"
                 txt_bienvenida = template.replace("{nombre}", _escape_html(nombre)) \
+                                         .replace("{username}", username_txt) \
                                          .replace("{id}", str(usuario.id)) \
                                          .replace("{minutos}", str(PROBATION_DEADLINE_1_MIN))
             else:
@@ -883,7 +885,7 @@ async def handler_setwelcome(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await update.message.reply_html(
                 "No hay un mensaje personalizado configurado.\n"
                 "Uso: <code>/setwelcome Hola {nombre}, tienes {minutos} min para saludar.</code>\n\n"
-                "Variables disponibles: <code>{nombre}</code>, <code>{id}</code>, <code>{minutos}</code>"
+                "Variables disponibles: <code>{nombre}</code>, <code>{username}</code>, <code>{id}</code>, <code>{minutos}</code>"
             )
         else:
             await update.message.reply_html(f"Mensaje actual:\n\n{actual}")
@@ -903,7 +905,7 @@ async def handler_setgatemsg(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await update.message.reply_html(
                 "No hay un mensaje de entrada configurado.\n"
                 "Uso: <code>/setgatemsg Hola {nombre}, para entrar pulsa el botón.</code>\n\n"
-                "Variables: <code>{nombre}</code>, <code>{id}</code>"
+                "Variables: <code>{nombre}</code>, <code>{username}</code>, <code>{id}</code>"
             )
         else:
             await update.message.reply_html(f"Mensaje de entrada actual:\n\n{actual}")
@@ -924,7 +926,10 @@ async def handler_solicitud_union(update: Update, context: ContextTypes.DEFAULT_
     template = obtener_config("gate_template")
     
     if template:
-        texto = template.replace("{nombre}", _escape_html(nombre)).replace("{id}", str(user.id))
+        username_txt = f"@{_escape_html(user.username)}" if user.username else "n/a"
+        texto = template.replace("{nombre}", _escape_html(nombre)) \
+                        .replace("{username}", username_txt) \
+                        .replace("{id}", str(user.id))
     else:
         texto = (
             f"👋 Hola <b>{_escape_html(nombre)}</b>!\n\n"
@@ -1491,7 +1496,7 @@ async def handler_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "✨ <b>Personalización</b>\n"
         "/setwelcome &lt;mensaje&gt; — Configura el saludo de nuevos integrantes\n"
         "/setgatemsg &lt;mensaje&gt; — Configura el mensaje de la puerta de entrada\n"
-        "  Variables: {nombre}, {id}, {minutos}\n"
+        "  Variables: {nombre}, {username}, {id}, {minutos}\n"
         "\n"
         "🔇 <b>Inactividad general</b>\n"
         "/noparticipa — Lista usuarios sin mensajes desde hace más de "
