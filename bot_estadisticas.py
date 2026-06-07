@@ -507,7 +507,7 @@ async def handler_miembro(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             f"{usuario.first_name or ''} {usuario.last_name or ''}".strip()
             or str(usuario.id)
         )
-                registrar_miembro(usuario.id, nombre, usuario.username)
+        registrar_miembro(usuario.id, nombre, usuario.username)
         logger.info(f"Miembro registrado: {nombre} (id={usuario.id})")
 
         # Iniciar periodo de probación si está habilitado
