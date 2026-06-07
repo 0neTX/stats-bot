@@ -1357,8 +1357,16 @@ async def handler_expulsarnuevos(update: Update, context: ContextTypes.DEFAULT_T
 
 async def handler_callback_nuevos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Maneja la confirmación/cancelación de /expulsarnuevos."""
-    global _pendientes_nuevos
     query = update.callback_query
+    
+    if query.from_user.id != ADMIN_ID:
+        try:
+            await query.answer("No tienes permiso para realizar esta acción.", show_alert=True)
+        except BadRequest:
+            pass
+        return
+
+    global _pendientes_nuevos
     try:
         await query.answer()
     except BadRequest:
@@ -1758,6 +1766,14 @@ async def handler_kick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def handler_callback_kick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Maneja la respuesta de los botones de confirmación de /kick."""
     query = update.callback_query
+
+    if query.from_user.id != ADMIN_ID:
+        try:
+            await query.answer("No tienes permiso para realizar esta acción.", show_alert=True)
+        except BadRequest:
+            pass
+        return
+
     try:
         await query.answer()
     except BadRequest:
