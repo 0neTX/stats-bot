@@ -957,10 +957,18 @@ async def handler_callback_gate(update: Update, context: ContextTypes.DEFAULT_TY
     target_user_id = int(data.replace("gate_approve_", ""))
     
     if query.from_user.id != target_user_id:
-        await query.answer("Este botón no es para ti.", show_alert=True)
+        try:
+            await query.answer("Este botón no es para ti.", show_alert=True)
+        except BadRequest:
+            pass
         return
 
-    await query.answer("¡Solicitud aprobada! Ya puedes entrar.")
+    try:
+        await query.answer("¡Solicitud aprobada! Ya puedes entrar.")
+    except BadRequest:
+        # La query puede haber caducado, pero intentamos procesar la aprobación igualmente
+        logger.debug(f"[gate] No se pudo responder a la query de {target_user_id} (caducada).")
+
     try:
         await context.bot.approve_chat_join_request(chat_id=GRUPO_ID, user_id=target_user_id)
         msg_aprobacion = (
@@ -1351,7 +1359,10 @@ async def handler_callback_nuevos(update: Update, context: ContextTypes.DEFAULT_
     """Maneja la confirmación/cancelación de /expulsarnuevos."""
     global _pendientes_nuevos
     query = update.callback_query
-    await query.answer()
+    try:
+        await query.answer()
+    except BadRequest:
+        pass
 
     if query.data == "nuevos_cancel":
         _pendientes_nuevos = []
@@ -1747,7 +1758,10 @@ async def handler_kick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def handler_callback_kick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Maneja la respuesta de los botones de confirmación de /kick."""
     query = update.callback_query
-    await query.answer()
+    try:
+        await query.answer()
+    except BadRequest:
+        pass
 
     if query.data == "kick_cancel":
         global _pendientes_kick
@@ -2048,6 +2062,14 @@ async def enviar_resumen_diario(context: ContextTypes.DEFAULT_TYPE) -> None:
 # Punto de entrada
 # ---------------------------------------------------------------------------
 
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log the error and send a telegram message to notify the developer."""
+    logger.error(f"Excepción manejada por el bot: {context.error}", exc_info=context.error)
+    # Si es una query caducada, no hace falta asustar al admin
+    if isinstance(context.error, BadRequest) and "query is too old" in str(context.error).lower():
+        return
+
+
 def main() -> None:
     if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN no encontrado en el archivo .env")
@@ -2058,6 +2080,8 @@ def main() -> None:
         .post_init(post_init)
         .build()
     )
+
+    app.add_error_handler(error_handler)
 
     app.add_handler(
         ChatMemberHandler(handler_miembro, ChatMemberHandler.CHAT_MEMBER)
