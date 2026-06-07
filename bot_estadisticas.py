@@ -34,6 +34,7 @@ from telegram import (
     BotCommandScopeChat,
     Update,
     ChatMemberUpdated,
+    ChatJoinRequest,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
 )
@@ -41,6 +42,7 @@ from telegram.error import BadRequest, RetryAfter
 from telegram.ext import (
     Application,
     ChatMemberHandler,
+    ChatJoinRequestHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -890,6 +892,81 @@ async def handler_setwelcome(update: Update, context: ContextTypes.DEFAULT_TYPE)
     logger.info(f"Admin actualizó el mensaje de bienvenida: {nuevo_mensaje}")
 
 
+async def handler_setgatemsg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Configura el mensaje de la puerta de entrada (solicitudes de unión)."""
+    if not context.args:
+        actual = obtener_config("gate_template")
+        if not actual:
+            await update.message.reply_html(
+                "No hay un mensaje de entrada configurado.\n"
+                "Uso: <code>/setgatemsg Hola {nombre}, para entrar pulsa el botón.</code>\n\n"
+                "Variables: <code>{nombre}</code>, <code>{id}</code>"
+            )
+        else:
+            await update.message.reply_html(f"Mensaje de entrada actual:\n\n{actual}")
+        return
+
+    nuevo_mensaje = " ".join(context.args)
+    guardar_config("gate_template", nuevo_mensaje)
+    await update.message.reply_html("✅ Mensaje de entrada (Gatekeeper) actualizado.")
+    logger.info(f"Admin actualizó el mensaje de entrada: {nuevo_mensaje}")
+
+
+async def handler_solicitud_union(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Maneja la solicitud de unión enviando un mensaje privado con un botón."""
+    solicitud: ChatJoinRequest = update.chat_join_request
+    user = solicitud.from_user
+    
+    nombre = f"{user.first_name or ''} {user.last_name or ''}".strip() or str(user.id)
+    template = obtener_config("gate_template")
+    
+    if template:
+        texto = template.replace("{nombre}", _escape_html(nombre)).replace("{id}", str(user.id))
+    else:
+        texto = (
+            f"👋 Hola <b>{_escape_html(nombre)}</b>!\n\n"
+            "Has solicitado entrar al grupo. Para completar tu acceso, por favor pulsa el botón de abajo."
+        )
+
+    keyboard = [[InlineKeyboardButton("✅ Entrar al Grupo", callback_data=f"gate_approve_{user.id}")]]
+    
+    try:
+        # Enviamos por privado al usuario
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=texto,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        logger.info(f"[gate] Solicitud recibida de {nombre} ({user.id}). Mensaje privado enviado.")
+    except Exception as e:
+        logger.error(f"[gate] No se pudo enviar mensaje privado a {user.id}: {e}")
+
+
+async def handler_callback_gate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Procesa el botón de aprobación de la puerta de entrada."""
+    query = update.callback_query
+    data = query.data
+    
+    if not data.startswith("gate_approve_"):
+        return
+        
+    target_user_id = int(data.replace("gate_approve_", ""))
+    
+    if query.from_user.id != target_user_id:
+        await query.answer("Este botón no es para ti.", show_alert=True)
+        return
+
+    await query.answer("¡Solicitud aprobada! Ya puedes entrar.")
+    try:
+        await context.bot.approve_chat_join_request(chat_id=GRUPO_ID, user_id=target_user_id)
+        await query.edit_message_text("✅ <b>¡Solicitud aprobada!</b> Ya eres miembro del grupo.", parse_mode="HTML")
+        logger.info(f"[gate] Usuario {target_user_id} aprobado vía botón.")
+    except Exception as e:
+        logger.error(f"[gate] Error al aprobar usuario {target_user_id}: {e}")
+        await query.edit_message_text(f"❌ Error al procesar tu entrada: {e}")
+
+
 async def handler_ok(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Expulsa los usuarios pendientes cuando el admin confirma con /ok."""
     if update.effective_user.id != ADMIN_ID:
@@ -1386,6 +1463,7 @@ async def handler_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "\n"
         "✨ <b>Personalización</b>\n"
         "/setwelcome &lt;mensaje&gt; — Configura el saludo de nuevos integrantes\n"
+        "/setgatemsg &lt;mensaje&gt; — Configura el mensaje de la puerta de entrada\n"
         "  Variables: {nombre}, {id}, {minutos}\n"
         "\n"
         "🔇 <b>Inactividad general</b>\n"
@@ -1851,6 +1929,7 @@ async def post_init(application: Application) -> None:
         BotCommand("report",              "Reporte TOP5 + DOWN5 + avisos"),
         BotCommand("infouser",            "Info detallada de un usuario"),
         BotCommand("setwelcome",          "Configura el mensaje de bienvenida"),
+        BotCommand("setgatemsg",          "Configura el mensaje de la puerta"),
         BotCommand("noparticipa",         f"Usuarios sin mensajes > {MAX_DAYS_INACTIVE_WARNING}d"),
         BotCommand("expulsarnoparticipa", "Expulsa listados por /noparticipa"),
         BotCommand("ok",                  "Confirma expulsiones pendientes"),
@@ -1975,6 +2054,9 @@ def main() -> None:
     app.add_handler(
         ChatMemberHandler(handler_miembro, ChatMemberHandler.CHAT_MEMBER)
     )
+    app.add_handler(
+        ChatJoinRequestHandler(handler_solicitud_union)
+    )
     _filtro_actividad = (
         filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL
         | filters.AUDIO | filters.ANIMATION | filters.VOICE | filters.VIDEO_NOTE
@@ -1984,6 +2066,7 @@ def main() -> None:
     _admin_privado = filters.ChatType.PRIVATE & filters.User(ADMIN_ID)
     app.add_handler(CommandHandler("ok",                   handler_ok,                   filters=_admin_privado))
     app.add_handler(CommandHandler("setwelcome",           handler_setwelcome,           filters=_admin_privado))
+    app.add_handler(CommandHandler("setgatemsg",           handler_setgatemsg,           filters=_admin_privado))
     app.add_handler(CommandHandler("noparticipa",          handler_noparticipa,          filters=_admin_privado))
     app.add_handler(CommandHandler("expulsarnoparticipa",  handler_expulsarnoparticipa,  filters=_admin_privado))
     app.add_handler(CommandHandler("moratoria",            handler_moratoria,            filters=_admin_privado))
@@ -2000,6 +2083,7 @@ def main() -> None:
 
     app.add_handler(CallbackQueryHandler(handler_callback_kick,   pattern="^kick_"))
     app.add_handler(CallbackQueryHandler(handler_callback_nuevos, pattern="^nuevos_"))
+    app.add_handler(CallbackQueryHandler(handler_callback_gate,   pattern="^gate_approve_"))
 
     job_queue = app.job_queue
     job_queue.run_repeating(
