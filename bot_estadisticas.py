@@ -284,6 +284,16 @@ def eliminar_probacion(user_id: int) -> None:
     _conn.commit()
 
 
+async def procesar_salida_usuario(bot, user_id: int) -> None:
+    """Maneja la salida de un usuario: limpia mensajes de probación y elimina de BD."""
+    prob = obtener_usuario_probacion(user_id)
+    if prob:
+        w_msg_id, a_msg_id, _, _ = prob
+        await _borrar_mensajes(bot, GRUPO_ID, [w_msg_id, a_msg_id])
+    
+    eliminar_miembro(user_id)
+
+
 def obtener_config(clave: str, default: str | None = None) -> str | None:
     """Obtiene un valor de configuración de la BD."""
     cursor = _conn.execute("SELECT valor FROM config WHERE clave = ?", (clave,))
@@ -523,8 +533,8 @@ async def handler_miembro(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 logger.error(f"Error al enviar mensaje de bienvenida a {usuario.id}: {e}")
 
     elif nuevo.status in estados_salida:
-        eliminar_miembro(usuario.id)
-        logger.info(f"Miembro eliminado: id={usuario.id} (estado={nuevo.status})")
+        await procesar_salida_usuario(context.bot, usuario.id)
+        logger.info(f"Miembro eliminado y probación limpiada: id={usuario.id} (estado={nuevo.status})")
 
 
 async def handler_mensaje(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -667,7 +677,7 @@ async def _ejecutar_expulsion(bot, user_id: int, nombre: str,
     try:
         await bot.ban_chat_member(chat_id=GRUPO_ID, user_id=user_id)
         await bot.unban_chat_member(chat_id=GRUPO_ID, user_id=user_id)
-        eliminar_miembro(user_id)
+        await procesar_salida_usuario(bot, user_id)
         logger.info(f"[{tag}] Expulsado: {nombre} ({alias})")
         return "expulsado", f"• {_escape_html(nombre)} ({alias})"
     except RetryAfter as exc:
@@ -677,7 +687,7 @@ async def _ejecutar_expulsion(bot, user_id: int, nombre: str,
         return await _ejecutar_expulsion(bot, user_id, nombre, username, tag)
     except BadRequest as exc:
         if "participant_id_invalid" in str(exc).lower():
-            eliminar_miembro(user_id)
+            await procesar_salida_usuario(bot, user_id)
             logger.info(f"[{tag}] Ya no estaba en el grupo, eliminado de BD: {nombre} ({alias})")
             return "ausente", f"• {_escape_html(nombre)} ({alias})"
         logger.warning(f"[{tag}] Error al expulsar {nombre} ({alias}): {exc}")
@@ -1018,7 +1028,7 @@ async def _filtrar_miembros_activos(
         try:
             member = await bot.get_chat_member(chat_id=GRUPO_ID, user_id=user_id)
             if member.status in ("left", "kicked"):
-                eliminar_miembro(user_id)
+                await procesar_salida_usuario(bot, user_id)
                 eliminados += 1
                 logger.info(f"[validacion] {nombre} ({alias}) ya no está en el grupo — eliminado de BD.")
             else:
@@ -1029,7 +1039,7 @@ async def _filtrar_miembros_activos(
             try:
                 member = await bot.get_chat_member(chat_id=GRUPO_ID, user_id=user_id)
                 if member.status in ("left", "kicked"):
-                    eliminar_miembro(user_id)
+                    await procesar_salida_usuario(bot, user_id)
                     eliminados += 1
                     logger.info(f"[validacion] {nombre} ({alias}) ya no está en el grupo — eliminado de BD.")
                 else:
@@ -1037,7 +1047,7 @@ async def _filtrar_miembros_activos(
             except Exception:
                 activos.append(row)
         except BadRequest:
-            eliminar_miembro(user_id)
+            await procesar_salida_usuario(bot, user_id)
             eliminados += 1
             logger.info(f"[validacion] {nombre} ({alias}) no encontrado en el grupo — eliminado de BD.")
         except Exception as exc:
@@ -1877,14 +1887,12 @@ async def job_revisar_probacion(context: ContextTypes.DEFAULT_TYPE) -> None:
             try:
                 member = await context.bot.get_chat_member(chat_id=GRUPO_ID, user_id=user_id)
                 if member.status in ("left", "kicked"):
-                    await _borrar_mensajes(context.bot, GRUPO_ID, [w_msg_id, a_msg_id])
-                    eliminar_miembro(user_id)
+                    await procesar_salida_usuario(context.bot, user_id)
                     logger.info(f"Usuario {nombre} (id={user_id}) ya no está en el grupo. Limpiando probación.")
                     continue
             except BadRequest:
                 # Usuario no encontrado
-                await _borrar_mensajes(context.bot, GRUPO_ID, [w_msg_id, a_msg_id])
-                eliminar_miembro(user_id)
+                await procesar_salida_usuario(context.bot, user_id)
                 logger.info(f"Usuario {nombre} (id={user_id}) no encontrado. Limpiando probación.")
                 continue
             except Exception as e:
@@ -1915,8 +1923,7 @@ async def job_revisar_probacion(context: ContextTypes.DEFAULT_TYPE) -> None:
                     await context.bot.unban_chat_member(chat_id=GRUPO_ID, user_id=user_id)
                     
                     # Limpiar mensajes y BD
-                    await _borrar_mensajes(context.bot, GRUPO_ID, [w_msg_id, a_msg_id])
-                    eliminar_miembro(user_id)
+                    await procesar_salida_usuario(context.bot, user_id)
                     logger.info(f"Usuario {nombre} (id={user_id}) expulsado automáticamente por inactividad inicial.")
                 except Exception as e:
                     logger.error(f"Error al expulsar al usuario {user_id} por probación: {e}")
