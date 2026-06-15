@@ -246,6 +246,19 @@ def eliminar_miembro(user_id: int) -> None:
     _conn.commit()
 
 
+def usuario_existe(user_id: int) -> bool:
+    """Comprueba si un usuario existe en la tabla de miembros (usuarios)."""
+    cursor = _conn.execute("SELECT 1 FROM usuarios WHERE user_id = ?", (user_id,))
+    return cursor.fetchone() is not None
+
+
+def obtener_mensajes_usuario(user_id: int) -> int:
+    """Devuelve el total de mensajes de un usuario."""
+    cursor = _conn.execute("SELECT total_mensajes FROM usuarios WHERE user_id = ?", (user_id,))
+    fila = cursor.fetchone()
+    return fila[0] if fila else 0
+
+
 def registrar_probacion(user_id: int, nombre: str, welcome_msg_id: int, expiry_date: datetime) -> None:
     """Registra a un usuario en el periodo de probación inicial."""
     _conn.execute("""
@@ -515,6 +528,16 @@ async def handler_miembro(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             # Añadimos un pequeño retraso para que el mensaje aparezca DESPUÉS de la notificación de Telegram
             await asyncio.sleep(2)
             
+            # Verificar si el usuario sigue en el grupo tras el sleep para evitar race conditions
+            if not usuario_existe(usuario.id):
+                logger.info(f"[probacion] Usuario {nombre} (id={usuario.id}) ya no está en la BD tras el sleep. Abortando.")
+                return
+                
+            # Verificar si ya participó durante el periodo de sleep
+            if obtener_mensajes_usuario(usuario.id) > 0:
+                logger.info(f"[probacion] Usuario {nombre} (id={usuario.id}) ya participó durante el sleep. Abortando.")
+                return
+
             expiry = datetime.now(timezone.utc) + timedelta(minutes=PROBATION_DEADLINE_1_MIN)
             
             # Obtener plantilla personalizada o usar la por defecto
@@ -1924,20 +1947,31 @@ async def job_revisar_probacion(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         if ahora > expiry:
             logger.info(f"[probacion] Vencimiento detectado para {nombre} (id={user_id}, status={status}).")
-            # Antes de actuar, verificar si el usuario sigue en el grupo
+            
+            # 1. Verificar si sigue en la BD de miembros activos
+            if not usuario_existe(user_id):
+                logger.info(f"[probacion] Usuario {nombre} (id={user_id}) no figura en tabla usuarios. Limpiando.")
+                await procesar_salida_usuario(context.bot, user_id)
+                continue
+
+            # 2. Verificar membresía real en Telegram
             try:
                 member = await context.bot.get_chat_member(chat_id=GRUPO_ID, user_id=user_id)
+                logger.info(f"[probacion] Estado de {nombre} (id={user_id}) en Telegram: {member.status}")
                 if member.status in ("left", "kicked"):
                     await procesar_salida_usuario(context.bot, user_id)
-                    logger.info(f"Usuario {nombre} (id={user_id}) ya no está en el grupo. Limpiando probación.")
+                    logger.info(f"[probacion] Usuario {nombre} (id={user_id}) ya no está en el grupo. Limpiando.")
                     continue
-            except BadRequest:
+            except BadRequest as e:
                 # Usuario no encontrado
-                await procesar_salida_usuario(context.bot, user_id)
-                logger.info(f"Usuario {nombre} (id={user_id}) no encontrado. Limpiando probación.")
+                if "user not found" in str(e).lower() or "participant_id_invalid" in str(e).lower():
+                    await procesar_salida_usuario(context.bot, user_id)
+                    logger.info(f"[probacion] Usuario {nombre} (id={user_id}) no encontrado en chat. Limpiando.")
+                else:
+                    logger.error(f"[probacion] Error BadRequest al consultar {user_id}: {e}")
                 continue
             except Exception as e:
-                logger.warning(f"Error comprobando membresía de {user_id} en probación: {e}")
+                logger.warning(f"[probacion] Error comprobando membresía de {user_id}: {e}")
                 continue
 
             if status == 0:
