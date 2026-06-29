@@ -1963,12 +1963,9 @@ async def job_revisar_probacion(context: ContextTypes.DEFAULT_TYPE) -> None:
                     logger.info(f"[probacion] Usuario {nombre} (id={user_id}) ya no está en el grupo. Limpiando.")
                     continue
             except BadRequest as e:
-                # Usuario no encontrado
-                if "user not found" in str(e).lower() or "participant_id_invalid" in str(e).lower():
-                    await procesar_salida_usuario(context.bot, user_id)
-                    logger.info(f"[probacion] Usuario {nombre} (id={user_id}) no encontrado en chat. Limpiando.")
-                else:
-                    logger.error(f"[probacion] Error BadRequest al consultar {user_id}: {e}")
+                # Si el usuario o el chat no son válidos, o no se encuentra en el chat, limpiamos para no buclear
+                await procesar_salida_usuario(context.bot, user_id)
+                logger.info(f"[probacion] Error BadRequest al consultar {user_id}: {e}. Registro de probación limpiado.")
                 continue
             except Exception as e:
                 logger.warning(f"[probacion] Error comprobando membresía de {user_id}: {e}")
@@ -1993,15 +1990,26 @@ async def job_revisar_probacion(context: ContextTypes.DEFAULT_TYPE) -> None:
             elif status == 1:
                 # Segundo plazo vencido (2m): expulsar
                 try:
-                    # Expulsar (ban + unban silencioso)
-                    await context.bot.ban_chat_member(chat_id=GRUPO_ID, user_id=user_id)
-                    await context.bot.unban_chat_member(chat_id=GRUPO_ID, user_id=user_id)
+                    try:
+                        # Expulsar (ban + unban silencioso)
+                        await context.bot.ban_chat_member(chat_id=GRUPO_ID, user_id=user_id)
+                        await context.bot.unban_chat_member(chat_id=GRUPO_ID, user_id=user_id)
+                        logger.info(f"Usuario {nombre} (id={user_id}) expulsado automáticamente por inactividad inicial.")
+                    except RetryAfter as exc:
+                        logger.warning(f"FloodWait detectado al expulsar {nombre} ({user_id}): esperando {exc.retry_after} segundos...")
+                        await asyncio.sleep(exc.retry_after)
+                        # Reintentar una vez
+                        await context.bot.ban_chat_member(chat_id=GRUPO_ID, user_id=user_id)
+                        await context.bot.unban_chat_member(chat_id=GRUPO_ID, user_id=user_id)
+                        logger.info(f"Usuario {nombre} (id={user_id}) expulsado automáticamente tras FloodWait.")
                     
-                    # Limpiar mensajes y BD
+                    # Si todo salió bien o se reintentó con éxito, limpiamos
                     await procesar_salida_usuario(context.bot, user_id)
-                    logger.info(f"Usuario {nombre} (id={user_id}) expulsado automáticamente por inactividad inicial.")
                 except Exception as e:
                     logger.error(f"Error al expulsar al usuario {user_id} por probación: {e}")
+                    # En caso de error permanente (ej. bot no es admin o usuario es admin),
+                    # limpiamos igualmente para no dejar mensajes huérfanos ni entrar en bucle infinito
+                    await procesar_salida_usuario(context.bot, user_id)
 
 
 # ---------------------------------------------------------------------------
