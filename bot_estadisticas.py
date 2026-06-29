@@ -149,6 +149,15 @@ def get_conn() -> sqlite3.Connection:
             valor TEXT
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS salidas_probacion (
+            user_id  INTEGER PRIMARY KEY,
+            nombre   TEXT,
+            username TEXT,
+            fecha    TEXT,
+            motivo   TEXT
+        )
+    """)
     conn.commit()
     return conn
 
@@ -299,12 +308,49 @@ def eliminar_probacion(user_id: int) -> None:
     _conn.commit()
 
 
+def registrar_salida_probacion(user_id: int, nombre: str, username: str | None, motivo: str) -> None:
+    """Registra una salida o expulsión durante el periodo de probación."""
+    ahora = datetime.now(timezone.utc).isoformat()
+    _conn.execute("""
+        INSERT OR IGNORE INTO salidas_probacion (user_id, nombre, username, fecha, motivo)
+        VALUES (?, ?, ?, ?, ?)
+    """, (user_id, nombre, username, ahora, motivo))
+    _conn.commit()
+
+
+def obtener_salidas_probacion() -> list[tuple]:
+    """Obtiene todas las salidas registradas durante la probación."""
+    cursor = _conn.execute("SELECT user_id, nombre, username, fecha, motivo FROM salidas_probacion ORDER BY fecha ASC")
+    return cursor.fetchall()
+
+
+def limpiar_salidas_probacion() -> None:
+    """Vacía el registro de salidas de probación."""
+    _conn.execute("DELETE FROM salidas_probacion")
+    _conn.commit()
+
+
 async def procesar_salida_usuario(bot, user_id: int) -> None:
     """Maneja la salida de un usuario: limpia mensajes de probación y elimina de BD."""
     prob = obtener_usuario_probacion(user_id)
     if prob:
         w_msg_id, a_msg_id, _, _ = prob
         await _borrar_mensajes(bot, GRUPO_ID, [w_msg_id, a_msg_id])
+        
+        # Intentar obtener los datos del usuario para el registro de salidas
+        nombre = "Desconocido"
+        username = None
+        cursor = _conn.execute("SELECT nombre, username FROM usuarios WHERE user_id = ?", (user_id,))
+        row = cursor.fetchone()
+        if row:
+            nombre, username = row
+        else:
+            cursor = _conn.execute("SELECT nombre FROM probacion WHERE user_id = ?", (user_id,))
+            row_p = cursor.fetchone()
+            if row_p:
+                nombre = row_p[0]
+        
+        registrar_salida_probacion(user_id, nombre, username, "salida")
     
     eliminar_miembro(user_id)
 
@@ -670,6 +716,16 @@ def _construir_texto_reporte() -> str | None:
     lineas.append("\n💤 <b>Down 5 — Menos activos</b>\n")
     for i, (user_id, nombre, username, total, ultimo, registro) in enumerate(down5):
         lineas.append(_formatear_usuario(user_id, nombre, username, total, calavers[i], ultimo, registro))
+
+    salidas = obtener_salidas_probacion()
+    if salidas:
+        lineas.append("\n🚪 <b>Salidas/Expulsiones en probación (últimas 24h)</b>\n")
+        for user_id, nombre, username, _, motivo in salidas:
+            alias = f"@{_escape_html(username)}" if username else f"id:<code>{user_id}</code>"
+            if motivo == "expulsado":
+                lineas.append(f"• <b>{_escape_html(nombre)}</b> ({alias}) — ❌ Expulsado/a por inactividad inicial")
+            else:
+                lineas.append(f"• <b>{_escape_html(nombre)}</b> ({alias}) — 🚪 Salió voluntariamente")
 
     return "\n".join(lineas)
 
@@ -1991,6 +2047,15 @@ async def job_revisar_probacion(context: ContextTypes.DEFAULT_TYPE) -> None:
                 # Segundo plazo vencido (2m): expulsar
                 try:
                     try:
+                        # Intentar obtener username de la BD de usuarios antes de la expulsión
+                        username_db = None
+                        cursor = _conn.execute("SELECT username FROM usuarios WHERE user_id = ?", (user_id,))
+                        row = cursor.fetchone()
+                        if row:
+                            username_db = row[0]
+                        
+                        registrar_salida_probacion(user_id, nombre, username_db, "expulsado")
+                        
                         # Expulsar (ban + unban silencioso)
                         await context.bot.ban_chat_member(chat_id=GRUPO_ID, user_id=user_id)
                         await context.bot.unban_chat_member(chat_id=GRUPO_ID, user_id=user_id)
@@ -2032,6 +2097,8 @@ async def enviar_resumen_diario(context: ContextTypes.DEFAULT_TYPE) -> None:
         parse_mode="HTML",
     )
     logger.info("Resumen diario enviado al admin.")
+    limpiar_salidas_probacion()
+    logger.info("Registro de salidas de probación limpiado.")
 
     await enviar_aviso_inactivos(context.bot)
     await enviar_reporte_expulsion(context.bot)
