@@ -553,6 +553,7 @@ async def handler_miembro(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     """Registra o elimina usuarios de la BD según entren o salgan del grupo."""
     cambio: ChatMemberUpdated = update.chat_member
     nuevo = cambio.new_chat_member
+    viejo = cambio.old_chat_member
     usuario = nuevo.user
 
     if usuario.is_bot:
@@ -562,6 +563,11 @@ async def handler_miembro(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     estados_salida  = {"left", "kicked"}
 
     if nuevo.status in estados_activos:
+        # Evitar procesar si el estado anterior ya era activo (evita duplicar bienvenida o probación por cambios de rango o restricciones)
+        if viejo and viejo.status in estados_activos:
+            logger.info(f"Ignorando cambio de estado interno activo para {usuario.first_name} (de {viejo.status} a {nuevo.status})")
+            return
+
         nombre = (
             f"{usuario.first_name or ''} {usuario.last_name or ''}".strip()
             or str(usuario.id)
@@ -609,6 +615,9 @@ async def handler_miembro(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 logger.error(f"Error al enviar mensaje de bienvenida a {usuario.id}: {e}")
 
     elif nuevo.status in estados_salida:
+        # Evitar procesar si el estado anterior ya era de salida (evita duplicar la limpieza)
+        if viejo and viejo.status in estados_salida:
+            return
         await procesar_salida_usuario(context.bot, usuario.id)
         logger.info(f"Miembro eliminado y probación limpiada: id={usuario.id} (estado={nuevo.status})")
 
@@ -1994,6 +2003,14 @@ async def job_revisar_probacion(context: ContextTypes.DEFAULT_TYPE) -> None:
     usuarios = obtener_todos_probacion()
 
     for user_id, nombre, w_msg_id, a_msg_id, expiry_str, status in usuarios:
+        # Si el usuario ya participó (p.ej. por una race condition o recuperación),
+        # limpiamos su probación de forma silenciosa y borramos sus mensajes, pero lo dejamos en la BD de miembros activos.
+        if obtener_mensajes_usuario(user_id) > 0:
+            logger.info(f"[probacion] Usuario {nombre} (id={user_id}) ya participó. Limpiando probación de forma silenciosa.")
+            await _borrar_mensajes(context.bot, GRUPO_ID, [w_msg_id, a_msg_id])
+            eliminar_probacion(user_id)
+            continue
+
         try:
             expiry = datetime.fromisoformat(expiry_str)
         except (ValueError, TypeError) as e:
