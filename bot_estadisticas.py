@@ -1962,11 +1962,7 @@ async def post_init(application: Application) -> None:
     texto = _construir_texto_reporte()
     if texto:
         nota = f"\n\n<i>🔄 {mensajes_nuevos:,} mensajes recuperados en este arranque</i>"
-        await application.bot.send_message(
-            chat_id=ADMIN_ID,
-            text=texto + nota,
-            parse_mode="HTML",
-        )
+        await _send_long_message(application.bot, ADMIN_ID, texto + nota, "HTML")
         logger.info(f"[arranque] Reporte enviado al admin (id={ADMIN_ID}).")
 
     await enviar_aviso_inactivos(application.bot)
@@ -2108,11 +2104,7 @@ async def enviar_resumen_diario(context: ContextTypes.DEFAULT_TYPE) -> None:
     down5 = obtener_down5()
     _loguear_reporte(top5, down5)
 
-    await context.bot.send_message(
-        chat_id=ADMIN_ID,
-        text=texto,
-        parse_mode="HTML",
-    )
+    await _send_long_message(context.bot, ADMIN_ID, texto, "HTML")
     logger.info("Resumen diario enviado al admin.")
     limpiar_salidas_probacion()
     logger.info("Registro de salidas de probación limpiado.")
