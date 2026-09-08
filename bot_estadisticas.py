@@ -63,6 +63,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# httpx (cliente HTTP de python-telegram-bot) loguea en INFO la URL completa de
+# cada request, que incluye el BOT_TOKEN (https://api.telegram.org/bot<TOKEN>/...).
+# Se sube a WARNING para que el token no acabe en el log.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 # ---------------------------------------------------------------------------
 # Variables de entorno
 # ---------------------------------------------------------------------------
